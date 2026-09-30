@@ -72,7 +72,7 @@ function statusText(j) {
   switch (j.status) {
     case "uploading": return "Uploading";
     case "queued": return "Waiting to start";
-    case "running": return STAGE_TEXT[j.stage] || (j.phase === "dub" ? "Dubbing" : "Starting");
+    case "running": return j.note || STAGE_TEXT[j.stage] || (j.phase === "dub" ? "Dubbing" : "Starting");
     case "stopping": return "Stopping";
     case "review": return "Ready for review";
     case "done": return "Dubbed";
@@ -122,6 +122,9 @@ const BLANK_FILM = {
   notes: "",
 };
 
+const SUBS = [["soft", "Switchable (viewers can turn them off)"], ["burn", "Always visible (burned in)"], ["none", "None"]];
+const subsOptions = cur => SUBS.map(([v, t]) => `<option value="${v}" ${v === cur ? "selected" : ""}>${t}</option>`).join("");
+
 function parseTime(v) {
   v = v.trim();
   if (!v) return null;
@@ -137,6 +140,7 @@ function showNew() {
   const c = S.config, d = c.defaults;
   const films = c.films.map(f => `<option value="${esc(f)}">${esc(f)}</option>`).join("");
   const dist = c.distances.map(x => `<option ${x === d.distance ? "selected" : ""}>${x}</option>`).join("");
+  const effort = c.efforts.map(x => `<option ${x === d.effort ? "selected" : ""}>${x}</option>`).join("");
   main().innerHTML = `
   <section class="new-dub">
     <header>
@@ -163,6 +167,9 @@ function showNew() {
         </label>
         <textarea class="film-json" id="filmjson" spellcheck="false" aria-label="Film profile JSON">${esc(JSON.stringify(BLANK_FILM, null, 1))}</textarea>
       </div>
+      <label class="field">Mongolian subtitles on the video
+        <small>Always visible also hides English subtitles already in the video under a dark bar.</small>
+        <select name="subs">${subsOptions(d.subs)}</select></label>
       <div class="pair">
         <label class="field">Clip start <small>Try a few minutes first. Empty = from the beginning.</small>
           <input name="start" placeholder="e.g. 2:00" inputmode="numeric"></label>
@@ -175,6 +182,10 @@ function showNew() {
           <label class="field">Translation model <input name="model" value="${esc(d.model)}"></label>
           <label class="field">Polish model <small>Stronger model = more natural lines</small>
             <input name="polish_model" value="${esc(d.polish_model || "")}" placeholder="same as translation"></label>
+          <label class="field">Parallel translation <small>Film parts translated at once. 3 is about 3 times faster; names can drift a little between parts.</small>
+            <input name="translate_workers" type="number" min="1" max="16" value="${d.translate_workers}"></label>
+          <label class="field">Thinking effort <small>Low is faster, high is more careful</small>
+            <select name="effort">${effort}</select></label>
           <label class="field">Voice model <input name="tts_model" value="${esc(d.tts_model)}"></label>
           <label class="field">Stability <small>Lower = more expressive</small>
             <input name="stability" type="number" min="0" max="1" step="0.05" value="${d.stability}"></label>
@@ -224,6 +235,7 @@ function showNew() {
         model: form.model.value.trim(), polish_model: form.polish_model.value.trim(),
         tts_model: form.tts_model.value.trim(), stability: form.stability.value, distance: form.distance.value,
         num_speakers: form.num_speakers.value, no_separate: form.no_separate.checked,
+        translate_workers: form.translate_workers.value, effort: form.effort.value, subs: form.subs.value,
       };
     } catch (err) {
       return toast(err instanceof SyntaxError ? `Film profile isn't valid JSON: ${err.message}` : err.message);
@@ -320,7 +332,7 @@ function renderJob() {
     $("#dubbar")?.remove();
   }
   if (mode === "active") {
-    $("#runtitle").textContent = j.status === "queued" ? "Waiting for the job ahead to finish" : statusText(j);
+    $("#runtitle").textContent = j.status === "queued" ? "Waiting for a free slot (other jobs are running)" : statusText(j);
     const log = $("#log"), atEnd = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
     log.textContent = j.log.join("\n");
     if (atEnd) log.scrollTop = log.scrollHeight;
@@ -406,7 +418,7 @@ document.addEventListener("click", async e => {
     await api(`/api/jobs/${j.id}/film`, { method: "PUT", json: film });
     if (e.target.id === "savefilm") return toast("Profile saved");
     const ok = await confirmBox("Retranslate the whole script?",
-      "Your current script, with your edits, is kept as a backup file in the job folder. Then the script is rewritten from the English with this profile. Voices aren't touched until you dub again.",
+      "Your current script, with your edits, is kept as a backup file in the job folder. Then the lines are rebuilt from the English and translated again with this profile. Voices aren't touched until you dub again.",
       "Retranslate");
     if (!ok) return;
     await flush();
@@ -448,7 +460,8 @@ function renderEditor() {
           ${j.has_final ? `<div class="switch" role="group" aria-label="Soundtrack">
             <button type="button" data-src="source" aria-pressed="true">English original</button>
             <button type="button" data-src="final" aria-pressed="false">Mongolian dub</button></div>` : ""}
-          <video id="vid" src="/api/jobs/${j.id}/video/source" controls preload="metadata"></video>
+          <video id="vid" src="/api/jobs/${j.id}/video/source" controls preload="metadata">
+            <track kind="subtitles" srclang="mn" label="Монгол" src="/api/jobs/${j.id}/subtitles.vtt" default></track></video>
         </div>
         <aside class="panel cast" id="cast"></aside>
       </section>
@@ -580,6 +593,9 @@ function wireEditor() {
     const t = v.currentTime, playing = !v.paused;
     $$(".switch button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
     v.src = `/api/jobs/${S.job.id}/video/${b.dataset.src}`;
+    // the burned-in Mongolian video already shows subtitles: don't draw them twice
+    const burned = b.dataset.src === "final" && S.job.options && S.job.options.subs === "burn";
+    if (v.textTracks[0]) v.textTracks[0].mode = burned ? "hidden" : "showing";
     v.addEventListener("loadedmetadata", () => { v.currentTime = t; if (playing) v.play(); }, { once: true });
   }));
 
@@ -676,6 +692,7 @@ async function flush() {
     S.job.estimate = r.estimate;
     renderDubBar();
     setSaveState("All changes saved");
+    refreshCaptions();
     return true;
   } catch (e) {
     edits.forEach(ed => S.dirty.set(ed.i, { ...ed, ...(S.dirty.get(ed.i) || {}) }));
@@ -684,6 +701,16 @@ async function flush() {
   }
 }
 window.addEventListener("beforeunload", e => { if (S.dirty.size) { flush(); e.preventDefault(); } });
+
+function refreshCaptions() {
+  const v = $("#vid"), old = v && v.querySelector("track");
+  if (!old) return;
+  const t = document.createElement("track");
+  Object.assign(t, { kind: "subtitles", srclang: "mn", label: "Монгол", default: true });
+  t.src = `/api/jobs/${S.job.id}/subtitles.vtt?t=${Date.now()}`;
+  old.replaceWith(t);
+  t.track.mode = "showing";
+}
 
 // ---- the one button that spends money
 function renderDubBar() {
@@ -696,12 +723,22 @@ function renderDubBar() {
     bar.className = "dubbar";
     document.body.append(bar);
     bar.addEventListener("click", e => e.target.id === "dubgo" && startDub());
+    bar.addEventListener("change", async e => {
+      if (e.target.id !== "subs") return;
+      try {
+        S.job = { ...S.job, ...(await api(`/api/jobs/${S.job.id}/options`, { method: "PUT", json: { subs: e.target.value } })) };
+        toast(S.job.status === "done" ? "Saved. Rebuild the video to apply it." : "Saved");
+      } catch (err) { toast(err.message); }
+    });
   }
   const e = j.estimate, again = j.status === "done";
   const text = e.lines
     ? `<strong>${fmt(e.lines)} ${e.lines === 1 ? "line needs" : "lines need"} a voice</strong>, about ${fmt(e.credits)} ElevenLabs credits. Lines already voiced are reused for free.`
     : `Every line already has a voice. ${again ? "Dubbing again only rebuilds the video." : "Dubbing costs no credits."}`;
-  bar.innerHTML = `<p>${text}</p><button id="dubgo" class="${e.lines ? "spend" : ""}">${!e.lines ? "Rebuild the video" : again ? "Dub the changes" : "Dub the film"}</button>`;
+  const subs = (j.options && j.options.subs) || S.config.defaults.subs;
+  bar.innerHTML = `<p>${text}</p><div class="dubgo">
+    <label class="subs-pick">Subtitles <select id="subs" aria-label="Mongolian subtitles on the video">${subsOptions(subs)}</select></label>
+    <button id="dubgo" class="${e.lines ? "spend" : ""}">${!e.lines ? "Rebuild the video" : again ? "Dub the changes" : "Dub the film"}</button></div>`;
 }
 
 async function startDub() {

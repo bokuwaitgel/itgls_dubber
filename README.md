@@ -40,8 +40,9 @@ python -m studio            # http://127.0.0.1:8000
 ```
 
 1. **New dub**: drop a video and pick or write a film profile (see below). Try a clip of a few minutes first.
-2. Wait while the job runs. You can close the page, because the work runs on the server. Only one job runs at a
-   time (one GPU); the others wait in a queue.
+2. Wait while the job runs. You can close the page, because the work runs on the server. Two jobs run at once
+   (`DUB_WORKERS` in `.env`); their GPU steps (voice separation, speaker analysis) take turns so an 8 GB card
+   doesn't run out of memory, while transcription, translation and voice generation run side by side.
 3. **Review**: the video, a timeline of every line coloured by speaker, and the full script. Click a timecode
    (or press Ctrl+Enter in a line) to hear that line in the original. Fix the Mongolian text or the speaker. Edits
    save automatically. The counter under each line turns red when the line is too long for its slot. You can also
@@ -49,6 +50,18 @@ python -m studio            # http://127.0.0.1:8000
 4. **Dub the film**: shows how many lines need a voice and the ElevenLabs credits, and asks before spending.
    Lines that were already voiced are cached, so after an edit only the changed lines cost credits.
 5. Switch the player to **Mongolian dub** to check it, then download.
+
+Mongolian subtitles: the studio player always shows them (from the current script, so edits show at once). For
+the final video pick one, on the upload form or next to the dub button (then rebuild the video):
+
+- **Switchable**: a subtitle track viewers can turn off. Instant, the picture isn't re-encoded.
+- **Always visible**: drawn into the picture, for TikTok, Shorts and Reels. English subtitles already burned into
+  the video are found automatically and hidden under a dark bar with the Mongolian text on it. Re-encodes the
+  video (on the GPU when there is one).
+- **None**.
+
+On the command line: `--subs soft|burn|none`. `subtitles_mn.srt` in the work folder has the subtitles timed to the
+dub.
 
 With `DUB_PASSWORD` in `.env` the studio shows a sign-in page. To use it from other computers, set it and run
 `python -m studio --host 0.0.0.0`. The server
@@ -82,6 +95,11 @@ python dub_video.py film.mp4 --film films/betrayed.json --until cast   # everyth
 python dub_video.py film.mp4 --film films/betrayed.json                # the rest (asks before spending)
 python dub_video.py --help
 ```
+
+Translation speed: polish requests run in parallel alongside the draft (`--polish-workers`, default 6).
+`--translate-workers 3` also translates three parts of the film at once, about 3 times faster, but names can
+drift a little between parts. `--effort low` makes the model think less (faster, a bit rougher).
+The studio has the same settings under Advanced settings.
 
 ## Layout
 

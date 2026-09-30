@@ -9,7 +9,9 @@ import json
 import re
 import subprocess
 import sys
+import threading
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -19,6 +21,10 @@ from .common import FFMPEG, ROOT, TAG
 
 MODEL = "gpt-6-luna"
 CHUNK = 40  # lines per request
+DRAFT_WORKERS = 1  # film segments translated side by side: N is ~N times faster, but each segment after the
+#                    first starts without the earlier names-per-voice history (slightly less consistent speakers)
+POLISH_WORKERS = 6  # polish requests in flight; each starts as soon as its lines (and look-ahead) are drafted
+EFFORT = "medium"  # OpenAI reasoning effort: low is faster, high is slower and more careful
 MIN_CHUNK = 5  # a failing chunk is halved down to this size before giving up
 CONTEXT = 15  # previous translated lines shown with each chunk
 LOOKAHEAD = 8  # following lines shown, so sentences split over lines are translated whole
@@ -191,7 +197,7 @@ def _client(model):
     return OpenAI()
 
 
-def _ask(client, model, system, user, clip, schema):
+def _ask(client, model, system, user, clip, schema, effort=EFFORT):
     if model.startswith("gemini"):
         from google.genai import types
         parts = ([types.Part.from_bytes(data=clip, mime_type="audio/mp3")] if clip else []) + [user]
@@ -200,20 +206,21 @@ def _ask(client, model, system, user, clip, schema):
             config=types.GenerateContentConfig(system_instruction=system, response_mime_type="application/json",
                                                response_schema=schema))
         return r.parsed, r.usage_metadata.total_token_count
-    r = client.responses.parse(model=model, reasoning={"effort": "medium"}, text_format=schema,
+    r = client.responses.parse(model=model, reasoning={"effort": effort}, text_format=schema,
                                input=[{"role": "system", "content": system}, {"role": "user", "content": user}])
     return r.output_parsed, r.usage.total_tokens
 
 
-def _cached(client, model, system, user, schema, n, clip=None):
+def _cached(client, model, system, user, schema, n, clip=None, effort=EFFORT):
     """Model call cached by its full prompt; retried until it returns exactly ids 0..n-1.
     Returns (None, tokens) if it keeps failing, so the caller can split the chunk."""
-    path = CACHE_DIR / f"{hashlib.sha1('|'.join([model, system, user]).encode()).hexdigest()[:16]}.json"
+    key = [model, system, user] + ([effort] if effort != EFFORT else [])  # default effort keeps old cache keys
+    path = CACHE_DIR / f"{hashlib.sha1('|'.join(key).encode()).hexdigest()[:16]}.json"
     if path.exists():
         return schema.model_validate_json(path.read_text(encoding="utf-8")).lines, 0
     total = 0
     for attempt in range(2):
-        parsed, used = _ask(client, model, system, user, clip, schema)
+        parsed, used = _ask(client, model, system, user, clip, schema, effort)
         total += used
         result = parsed.lines if parsed else []
         if sorted(l.id for l in result) == list(range(n)):
@@ -224,16 +231,19 @@ def _cached(client, model, system, user, schema, n, clip=None):
 
 
 def _chunks(total, size):
-    """(start, length) of each chunk, as a queue: a chunk the model keeps failing is re-queued as two halves."""
     return [(n, min(size, total - n)) for n in range(0, total, size)]
 
 
-def _split(queue, n, size):
+def _solve(n, size, fn):
+    """fn(n, size) -> (applied, tokens). A range the model keeps failing is retried as two halves, in order."""
+    applied, tokens = fn(n, size)
+    if applied:
+        return tokens
     if size <= MIN_CHUNK:
-        sys.exit(f"model keeps failing on lines {n}-{n + size}; check them in lines.json")
+        raise RuntimeError(f"model keeps failing on lines {n}-{n + size}; check them in lines.json")
     half = size // 2
     print(f"      splitting lines {n}-{n + size} in two", flush=True)
-    queue[:0] = [(n, half), (n + half, size - half)]
+    return tokens + _solve(n, half, fn) + _solve(n + half, size - half, fn)
 
 
 def _film_notes(film):
@@ -249,8 +259,12 @@ def max_chars(line):
     return max(10, int((line["end"] - line["start"]) * CHARS_PER_SEC))
 
 
-def write_script(lines, film, voices, model, audio=None, chunk_size=CHUNK, polish_model=None):
-    """Returns lines with "speaker", "draft" (first pass) and "mn" (after the polish pass) added."""
+def write_script(lines, film, voices, model, audio=None, chunk_size=CHUNK, polish_model=None,
+                 draft_workers=DRAFT_WORKERS, polish_workers=POLISH_WORKERS, effort=EFFORT):
+    """Returns lines with "speaker", "draft" (first pass) and "mn" (after the polish pass) added.
+
+    Draft chunks run in order within each segment (each chunk sees the previous lines and what each voice was
+    called so far); polish chunks run in parallel alongside, each as soon as the drafts it looks at exist."""
     guide = read_guide(ROOT / film["guide"] if film.get("guide") else None)
     system = SYSTEM.format(title=film.get("title", "untitled"), genre=film.get("genre", "drama"),
                            premise=film.get("premise", ""), narrator=film.get("narrator", "the main character"),
@@ -262,51 +276,74 @@ def write_script(lines, film, voices, model, audio=None, chunk_size=CHUNK, polis
     client = _client(model)
     if model.startswith("gemini"):
         system += AUDIO_NOTE
-
     not_speakers = set(film.get("not_speakers", []))
-    characters = sorted((set(film.get("names", {})) | set(film.get("aliases", {}))) - not_speakers)
-    history = defaultdict(Counter)  # voice -> Counter(character)
+    known = (set(film.get("names", {})) | set(film.get("aliases", {}))) - not_speakers
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    done, tokens = [], 0
-    queue = _chunks(len(lines), chunk_size)
-    while queue:
-        n, size = queue.pop(0)
-        chunk = lines[n:n + size]
-        clip_start = max(0.0, chunk[0]["start"] - AUDIO_PAD)
-        in_chunk = sorted({l["voice"] for l in chunk} - {"SFX"})
-        payload = {
-            "known_characters": characters,
-            "voice_history": {v: {"voice": f"{voices[v].get('gender', '?')}, {voices[v].get('age_group', '?')}",
-                                  "called_so_far": dict(history[v].most_common(4))}
-                              for v in in_chunk if v in voices},
-            "previous_lines": [{"speaker": d["speaker"], "voice": d["voice"], "en": d["en"], "mn": d["draft"]}
-                               for d in done[-CONTEXT:]],
-            "lines": [{"id": i, "voice": l["voice"], "heard": heard(l), "seconds": round(l["end"] - l["start"], 1),
-                       "max_chars": max_chars(l), "en": l["en"]}
-                      | ({"at": round(l["start"] - clip_start, 1)} if audio else {})
-                      for i, l in enumerate(chunk)],
-            "next_lines": [l["en"] for l in lines[n + size:n + size + LOOKAHEAD]],
-        }
-        user = json.dumps(payload, ensure_ascii=False, indent=1)
-        clip = audio_clip(audio, clip_start, chunk[-1]["end"] + AUDIO_PAD) if audio else None
-        result, used = _cached(client, model, system, user, Chunk, len(chunk), clip)
-        tokens += used
-        if result is None:
-            _split(queue, n, size)
-            continue
-        for r in sorted(result, key=lambda r: r.id):
-            line = {**chunk[r.id], "speaker": r.speaker.strip(), "draft": r.text.strip()}
-            done.append(line)
-            if line["voice"] != "SFX":
-                history[line["voice"]][line["speaker"]] += 1
-        characters = sorted(set(characters) | {d["speaker"] for d in done})
-        print(f"      draft  [{n + size}/{len(lines)}] "
-              f"{'cached' if not used else f'{used} tokens'}", flush=True)
 
-    tokens += polish(done, film, polish_model or model, chunk_size)
-    join_fragments(done)
-    print(f"      {tokens} tokens this run")
-    return done
+    out = [None] * len(lines)  # drafted lines, filled in as chunks finish
+    lock = threading.Lock()
+    stats = {"tokens": 0, "drafted": 0, "polished": 0}
+    polisher = Polisher(out, film, polish_model or model, chunk_size, effort, stats, lock, polish_workers)
+
+    def draft_segment(ranges):
+        history = defaultdict(Counter)  # voice -> Counter(character), within this segment
+        context, characters = [], set(known)
+
+        def one(n, size):
+            chunk = lines[n:n + size]
+            clip_start = max(0.0, chunk[0]["start"] - AUDIO_PAD)
+            in_chunk = sorted({l["voice"] for l in chunk} - {"SFX"})
+            payload = {
+                "known_characters": sorted(characters),
+                "voice_history": {v: {"voice": f"{voices[v].get('gender', '?')}, {voices[v].get('age_group', '?')}",
+                                      "called_so_far": dict(history[v].most_common(4))}
+                                  for v in in_chunk if v in voices},
+                "previous_lines": [{"speaker": d["draft_speaker"], "voice": d["voice"], "en": d["en"],
+                                    "mn": d["draft"]} for d in context[-CONTEXT:]],
+                "lines": [{"id": i, "voice": l["voice"], "heard": heard(l), "seconds": round(l["end"] - l["start"], 1),
+                           "max_chars": max_chars(l), "en": l["en"]}
+                          | ({"at": round(l["start"] - clip_start, 1)} if audio else {})
+                          for i, l in enumerate(chunk)],
+                "next_lines": [l["en"] for l in lines[n + size:n + size + LOOKAHEAD]],
+            }
+            user = json.dumps(payload, ensure_ascii=False, indent=1)
+            clip = audio_clip(audio, clip_start, chunk[-1]["end"] + AUDIO_PAD) if audio else None
+            result, used = _cached(client, model, system, user, Chunk, len(chunk), clip, effort)
+            if result is None:
+                return False, used
+            for r in sorted(result, key=lambda r: r.id):
+                speaker = r.speaker.strip()
+                line = {**chunk[r.id], "speaker": speaker, "draft_speaker": speaker, "draft": r.text.strip()}
+                out[n + r.id] = line
+                context.append(line)
+                characters.add(speaker)
+                if line["voice"] != "SFX":
+                    history[line["voice"]][speaker] += 1
+            with lock:
+                stats["drafted"] += size
+                print(f"      draft  [{stats['drafted']}/{len(lines)}] "
+                      f"{'cached' if not used else f'{used} tokens'}", flush=True)
+            polisher.schedule()
+            return True, used
+
+        return sum(_solve(n, size, one) for n, size in ranges)
+
+    ranges = _chunks(len(lines), chunk_size)
+    per = -(-len(ranges) // max(1, min(draft_workers, len(ranges))))  # chunks per segment, rounded up
+    segments = [ranges[i:i + per] for i in range(0, len(ranges), per)]
+    try:
+        with ThreadPoolExecutor(len(segments)) as pool:
+            for used in pool.map(draft_segment, segments):
+                stats["tokens"] += used
+        polisher.schedule()
+        polisher.wait()
+    except RuntimeError as e:
+        sys.exit(str(e))
+    finally:
+        polisher.close()
+    join_fragments(out)
+    print(f"      {stats['tokens']} tokens this run")
+    return out
 
 
 def _tag(m):
@@ -329,35 +366,60 @@ def join_fragments(lines):
             b["speaker"] = a["speaker"]
 
 
-def polish(lines, film, model, chunk_size=CHUNK):
-    """Second pass: a native-editor rewrite of the draft for meaning, grammar and natural speech. Sets "mn"."""
-    system = POLISH.format(title=film.get("title", "untitled"), genre=film.get("genre", "drama"), style=STYLE,
-                           tags=TAGS + ", " + SOUNDS)
-    system += _film_notes(film)
-    client, tokens = _client(model), 0
-    queue = _chunks(len(lines), chunk_size)
-    while queue:
-        n, size = queue.pop(0)
-        chunk = lines[n:n + size]
+class Polisher:
+    """Second pass: a native-editor rewrite of the draft for meaning, grammar and natural speech. Sets "mn".
+
+    A chunk is sent as soon as its drafts, the drafts just before it and its look-ahead exist, so polishing runs
+    alongside the draft. Its context comes from drafts only, so polish chunks never wait on each other."""
+
+    def __init__(self, lines, film, model, chunk_size, effort, stats, lock, workers=POLISH_WORKERS):
+        self.lines, self.model, self.effort, self.stats, self.lock = lines, model, effort, stats, lock
+        self.system = POLISH.format(title=film.get("title", "untitled"), genre=film.get("genre", "drama"),
+                                    style=STYLE, tags=TAGS + ", " + SOUNDS) + _film_notes(film)
+        self.client = _client(model)
+        self.pending = _chunks(len(lines), chunk_size)
+        self.pool = ThreadPoolExecutor(max(1, workers))
+        self.futures = []
+
+    def _ready(self, n, size):
+        lo, hi = max(0, n - CONTEXT), min(len(self.lines), n + size + LOOKAHEAD)
+        return all(self.lines[i] is not None for i in range(lo, hi))
+
+    def schedule(self):
+        with self.lock:
+            ready = [r for r in self.pending if self._ready(*r)]
+            self.pending = [r for r in self.pending if r not in ready]
+            self.futures += [self.pool.submit(_solve, n, size, self._one) for n, size in ready]
+
+    def wait(self):
+        for f in self.futures:
+            self.stats["tokens"] += f.result()
+
+    def close(self):
+        self.pool.shutdown(wait=True, cancel_futures=True)
+
+    def _one(self, n, size):
+        lines, chunk = self.lines, self.lines[n:n + size]
         payload = {
-            "previous_lines": [{"speaker": d["speaker"], "mn": d["mn"]} for d in lines[max(0, n - CONTEXT):n]],
-            "lines": [{"id": i, "speaker": l["speaker"], "heard": heard(l), "max_chars": max_chars(l), "en": l["en"],
-                       "draft": l["draft"]} for i, l in enumerate(chunk)],
-            "next_lines": [{"speaker": l["speaker"], "en": l["en"], "draft": l["draft"]}
+            "previous_lines": [{"speaker": d["draft_speaker"], "draft": d["draft"]}
+                               for d in lines[max(0, n - CONTEXT):n]],
+            "lines": [{"id": i, "speaker": l["draft_speaker"], "heard": heard(l), "max_chars": max_chars(l),
+                       "en": l["en"], "draft": l["draft"]} for i, l in enumerate(chunk)],
+            "next_lines": [{"speaker": l["draft_speaker"], "en": l["en"], "draft": l["draft"]}
                            for l in lines[n + size:n + size + LOOKAHEAD]],
         }
-        result, used = _cached(client, model, system, json.dumps(payload, ensure_ascii=False, indent=1),
-                               FixedChunk, len(chunk))
-        tokens += used
+        result, used = _cached(self.client, self.model, self.system, json.dumps(payload, ensure_ascii=False, indent=1),
+                               FixedChunk, len(chunk), effort=self.effort)
         if result is None:
-            _split(queue, n, size)
-            continue
+            return False, used
         for r in result:
             chunk[r.id]["mn"] = clean_tags(r.text)
-            chunk[r.id]["speaker"] = r.speaker.strip() or chunk[r.id]["speaker"]
-        print(f"      polish [{n + size}/{len(lines)}] "
-              f"{'cached' if not used else f'{used} tokens'}", flush=True)
-    return tokens
+            chunk[r.id]["speaker"] = r.speaker.strip() or chunk[r.id]["draft_speaker"]
+        with self.lock:
+            self.stats["polished"] += size
+            print(f"      polish [{self.stats['polished']}/{len(lines)}] "
+                  f"{'cached' if not used else f'{used} tokens'}", flush=True)
+        return True, used
 
 
 def gender_warnings(lines, cast):

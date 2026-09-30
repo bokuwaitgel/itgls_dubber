@@ -19,10 +19,11 @@ from pathlib import Path
 from dub_video import build_parser
 from dubflow.common import ROOT, load_json, read_script, save_json, stamp, write_script
 
-DATA = Path(os.getenv("DUB_DATA", ROOT / "data")) / "jobs"
+DATA = (ROOT / os.getenv("DUB_DATA", "data")).resolve() / "jobs"  # a relative DUB_DATA is inside the project
 TTS_CACHE = ROOT / "cache" / "tts"
 POOL = ROOT / "voices" / "pool.json"
 LOG_TAIL = 60  # log lines sent with a job
+WORKERS = max(1, int(os.getenv("DUB_WORKERS", "2")))  # jobs running at once; GPU stages still take turns
 VIDEO_EXT = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
 ACTIVE = ("queued", "running", "stopping")
 
@@ -30,8 +31,12 @@ ACTIVE = ("queued", "running", "stopping")
 OPTIONS = {"start": ("--start", float), "end": ("--end", float), "model": ("--model", str),
            "polish_model": ("--polish-model", str), "tts_model": ("--tts-model", str),
            "stability": ("--stability", float), "distance": ("--distance", str), "dub_gain": ("--dub-gain", float),
-           "num_speakers": ("--num-speakers", int), "chunk": ("--chunk", int), "no_separate": ("--no-separate", bool)}
+           "num_speakers": ("--num-speakers", int), "chunk": ("--chunk", int), "no_separate": ("--no-separate", bool),
+           "translate_workers": ("--translate-workers", int), "polish_workers": ("--polish-workers", int),
+           "effort": ("--effort", str), "subs": ("--subs", str)}
 DISTANCES = ("close", "medium", "far")
+EFFORTS = ("low", "medium", "high")
+SUBS = ("soft", "burn", "none")
 
 _lock = threading.RLock()
 _queue = queue.Queue()
@@ -56,6 +61,13 @@ def clean_options(raw):
             raise ValueError(f"{key} must be a {kind.__name__}")
     if out.get("distance", "medium") not in DISTANCES:
         raise ValueError(f"distance must be one of {', '.join(DISTANCES)}")
+    if out.get("subs", "soft") not in SUBS:
+        raise ValueError(f"subs must be one of {', '.join(SUBS)}")
+    if out.get("effort", "medium") not in EFFORTS:
+        raise ValueError(f"effort must be one of {', '.join(EFFORTS)}")
+    for key in ("translate_workers", "polish_workers"):
+        if not 1 <= out.get(key, 1) <= 16:
+            raise ValueError(f"{key} must be between 1 and 16")
     if "start" in out and "end" in out and out["end"] <= out["start"]:
         raise ValueError("end must be after start")
     return out
@@ -109,20 +121,20 @@ def delete(jid):
 
 
 def paths(job):
-    work = Path(job["work"])
-    return {"work": work, "video": Path(job["video"]), "film": job_dir(job["id"]) / "film.json",
+    work = ROOT / job["work"]
+    return {"work": work, "video": ROOT / job["video"], "film": job_dir(job["id"]) / "film.json",
             "script": work / "script_mn.txt", "script_json": work / "script.json", "voices": work / "voices.json",
             "log": job_dir(job["id"]) / "run.log"}
 
 
 def source_video(job):
     """What the script's timings refer to: the excerpt when the job is a test clip, else the input video."""
-    excerpt = Path(job["work"]) / "source.mp4"
-    return excerpt if excerpt.exists() else Path(job["video"])
+    excerpt = ROOT / job["work"] / "source.mp4"
+    return excerpt if excerpt.exists() else ROOT / job["video"]
 
 
 def final_video(job):
-    return next((p for p in sorted(Path(job["work"]).glob("*_mn.mp4"))), None)
+    return next((p for p in sorted((ROOT / job["work"]).glob("*_mn.mp4"))), None)
 
 
 def log_tail(job, n=LOG_TAIL):
@@ -181,7 +193,7 @@ def _kill(proc):
 
 def _run(job):
     jid, log_path = job["id"], paths(job)["log"]
-    update(jid, status="running", stage=None, error=None)
+    update(jid, status="running", stage=None, error=None, note=None)
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
     with log_path.open("a", encoding="utf-8") as log:
         log.write(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} {job['phase']}\n")
@@ -197,7 +209,9 @@ def _run(job):
             log.write(line)
             log.flush()
             if line.startswith("== "):
-                update(jid, stage=line[3:].split(":")[0].strip())
+                update(jid, stage=line[3:].split(":")[0].strip(), note=None)
+            elif "waiting for the GPU" in line:
+                update(jid, note="Waiting for the GPU (another job is using it)")
         code = proc.wait()
     _procs.pop(jid, None)
     status = load(jid)["status"]
@@ -234,7 +248,8 @@ def start():
             update(job["id"], status="failed", error="The upload didn't finish. Delete this job and upload again.")
         elif job["status"] == "queued":
             _queue.put(job["id"])
-    threading.Thread(target=_worker, daemon=True, name="dub-worker").start()
+    for n in range(WORKERS):
+        threading.Thread(target=_worker, daemon=True, name=f"dub-worker-{n}").start()
 
 
 # ---- script and voices
@@ -316,6 +331,12 @@ def save_voices(job, voices):
             current[_clean_speaker(speaker)] = {"voice_id": vid, "pitch": pitch} if pitch else vid
         save_json(p["voices"], current)
     return current
+
+
+def subtitles_vtt(job):
+    """Mongolian captions for the studio player, straight from the script (so edits show at once)."""
+    from dubflow import subtitles
+    return subtitles.vtt(subtitles.cues(read_script(paths(job)["script"])))
 
 
 def backup_script(job):

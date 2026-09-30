@@ -1,7 +1,10 @@
 """Shared helpers: ffmpeg I/O, timestamps, the dub script format, JSON."""
 import json
+import os
 import re
 import subprocess
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import imageio_ffmpeg
@@ -18,6 +21,43 @@ ANALYSIS_RATE = 16000  # diarization and classifiers
 
 HEADER = re.compile(r"(\d+):(\d+):(\d+),(\d+)\s*-->\s*(\d+):(\d+):(\d+),(\d+)\s*\[(.+?)\]")
 TAG = re.compile(r"\[[^\]]*\]")
+HEADER_SRT = re.compile(r"(\d+):(\d+):(\d+),(\d+)\s*-->\s*(\d+):(\d+):(\d+),(\d+)")
+
+
+@contextmanager
+def gpu_lock(device):
+    """One GPU-heavy stage at a time across every running pipeline (an 8 GB card can't hold two jobs' models).
+    A file lock, so a killed process releases it."""
+    if device != "cuda":
+        yield
+        return
+    path = ROOT / "cache" / "gpu.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a+b") as f:
+        waiting = False
+        while True:
+            try:
+                _lock_file(f, True)
+                break
+            except OSError:
+                if not waiting:
+                    print("      waiting for the GPU (another job is using it)", flush=True)
+                    waiting = True
+                time.sleep(2)
+        try:
+            yield
+        finally:
+            _lock_file(f, False)
+
+
+def _lock_file(f, lock):
+    if os.name == "nt":
+        import msvcrt
+        f.seek(0)
+        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK if lock else msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(f, (fcntl.LOCK_EX | fcntl.LOCK_NB) if lock else fcntl.LOCK_UN)
 
 
 def ffmpeg(*args):

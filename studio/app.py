@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from dubflow.common import ROOT, load_json, save_json
@@ -125,7 +125,7 @@ def index():
 
 @app.get("/api/config")
 def config():
-    return {"defaults": jobs.defaults(), "distances": jobs.DISTANCES, "login": bool(_password()),
+    return {"defaults": jobs.defaults(), "distances": jobs.DISTANCES, "efforts": jobs.EFFORTS, "login": bool(_password()),
             "missing_keys": [k for k in KEYS if not os.getenv(k)],
             "films": sorted(p.stem for p in FILMS.glob("*.json"))}
 
@@ -140,7 +140,7 @@ def film(name: str):
 
 @app.get("/api/jobs")
 def list_jobs():
-    return [{k: j.get(k) for k in ("id", "title", "status", "phase", "stage", "created", "updated")}
+    return [{k: j.get(k) for k in ("id", "title", "status", "phase", "stage", "note", "created", "updated")}
             for j in jobs.all_jobs()]
 
 
@@ -210,11 +210,12 @@ def dub_job(jid: str, body: dict = Body(...)):
 
 @app.post("/api/jobs/{jid}/retranslate")
 def retranslate(jid: str):
-    """Re-run the translation (e.g. after editing the film profile). The current script is backed up first."""
+    """Rebuild the lines from the transcript and re-run the translation (e.g. after editing the film profile).
+    The current script is backed up first. Speaker diarization is reused."""
     job = _job(jid)
     _idle(job)
     backup = jobs.backup_script(job)
-    return {**detail(jobs.enqueue(jid, "prepare", ["script"])), "backup": backup}
+    return {**detail(jobs.enqueue(jid, "prepare", ["analyze", "script"])), "backup": backup}
 
 
 @app.get("/api/jobs/{jid}/film")
@@ -228,6 +229,26 @@ def put_film(jid: str, body: dict = Body(...)):
     _idle(job)
     save_json(jobs.paths(job)["film"], body)
     return body
+
+
+@app.put("/api/jobs/{jid}/options")
+def put_options(jid: str, body: dict = Body(...)):
+    """Change settings used by the next run (e.g. subtitles before rebuilding the video)."""
+    job = _job(jid)
+    _idle(job)
+    try:
+        options = jobs.clean_options({**job["options"], **body})
+    except ValueError as e:
+        raise _bad(e)
+    return detail(jobs.update(jid, options=options))
+
+
+@app.get("/api/jobs/{jid}/subtitles.vtt")
+def subtitles_vtt(jid: str):
+    job = _job(jid)
+    if not jobs.paths(job)["script"].exists():
+        raise HTTPException(404, "The script isn't written yet.")
+    return Response(jobs.subtitles_vtt(job), media_type="text/vtt; charset=utf-8", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/api/jobs/{jid}/script")

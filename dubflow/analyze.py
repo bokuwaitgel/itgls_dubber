@@ -26,6 +26,8 @@ AGE_MODEL = "audeering/wav2vec2-large-robust-24-ft-age-gender"
 EMOTION_MODEL = "ehcalabres/wav2vec2-lg-xlsr-en-speech-emotion-recognition"
 
 MAX_GAP = 0.8  # seconds of silence that starts a new line
+EVENT_BRIDGE = 1.5  # sound events longer than this ([dragon roaring]) don't count as speech for line timing
+MAX_WORD_SEC = 1.5  # Scribe sometimes stretches a word over the silence after it ("her." lasting 15 s)
 MAX_LEN = 8.0  # split a line at the next sentence end after this many seconds
 MIN_FEATURE_SEC = 0.6  # shorter lines get no gender/age/emotion
 MAX_FEATURE_SEC = 10.0  # classifiers see at most this much of a line
@@ -94,12 +96,21 @@ def build_lines(scribe_words, turns):
     A voice change is either pyannote's or Scribe's: each one sometimes merges two actors the other keeps
     apart, and the per-line gender/age check tells the script model who is who.
     """
-    words = [w for w in scribe_words if w["type"] in ("word", "audio_event") and w.get("start") is not None]
+    words = [{**w, "end": min(w["end"], w["start"] + MAX_WORD_SEC)} if w["type"] == "word" else w
+             for w in scribe_words if w["type"] in ("word", "audio_event") and w.get("start") is not None]
     speakers = word_speakers(words, turns) if turns else [w.get("speaker_id") or "V00" for w in words]
     lines, cur, prev_end, scribe_spk = [], None, None, None
     for w, spk in zip(words, speakers):
         is_word = w["type"] == "word"
         text = w["text"] if is_word else f"[{w['text'].strip('()[] ')}]"
+        if not is_word and w["end"] - w["start"] > EVENT_BRIDGE:
+            # A long sound ([dragon roaring] 8 s) is noted where it happens but is not speech: it must not glue
+            # two sentences with a pause between them into one line, or stretch a line's end.
+            if cur is None or w["start"] - prev_end > MAX_GAP:
+                lines.append({"start": w["start"], "end": w["end"], "voice": None, "en": text, "speech_start": None})
+            else:
+                cur["en"] += " " + text
+            continue
         changed = is_word and cur is not None and cur["voice"] is not None and (
             spk != cur["voice"] or w.get("speaker_id") != scribe_spk)
         new = (cur is None or changed or w["start"] - prev_end > MAX_GAP

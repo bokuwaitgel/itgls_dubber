@@ -29,7 +29,7 @@ import sys
 import time
 from pathlib import Path
 
-from dubflow.common import ANALYSIS_RATE, ROOT, decode, load_json, read_script, save_json, stamp, write_script
+from dubflow.common import ANALYSIS_RATE, MIX_RATE, ROOT, decode, gpu_lock, load_json, read_script, save_json, stamp, write_script
 
 STAGES = ["extract", "separate", "transcribe", "analyze", "script", "cast", "dub", "mux"]
 
@@ -54,10 +54,18 @@ def build_parser():
     ap.add_argument("--model", default="gpt-6-luna", help="script model (OpenAI, or gemini-... to also send audio)")
     ap.add_argument("--chunk", type=int, default=40, help="lines per script-model request (lower if it drops lines)")
     ap.add_argument("--polish-model", help="model for the native-editor polish pass (default: --model)")
+    ap.add_argument("--translate-workers", type=int, default=1,
+                    help="film segments translated in parallel (faster; >1 slightly less consistent speaker names)")
+    ap.add_argument("--polish-workers", type=int, default=6, help="polish requests in parallel")
+    ap.add_argument("--effort", choices=["low", "medium", "high"], default="medium",
+                    help="OpenAI reasoning effort for translation and polish (low = faster)")
     ap.add_argument("--tts-model", default="eleven_v4", help="ElevenLabs TTS model id")
     ap.add_argument("--tts-workers", type=int, default=4, help="parallel TTS requests (raise if your plan allows)")
     ap.add_argument("--stability", type=float, default=0.5)
     ap.add_argument("--dub-gain", type=float, default=1.3)
+    ap.add_argument("--subs", choices=["soft", "burn", "none"], default="soft",
+                    help="Mongolian subtitles in the final video: soft = a track viewers can switch off, "
+                         "burn = drawn into the picture (always visible, re-encodes the video), none")
     ap.add_argument("--distance", choices=["close", "medium", "far"], default="medium",
                     help="mic distance feel of the dub voices")
     ap.add_argument("--duck", type=float, help="original voice level under dub lines (default 0 with stems, 0.05 without)")
@@ -85,7 +93,7 @@ def main():
         source="source.mp4", original="original.wav", vocals="vocals.wav", background="background.wav",
         transcript="transcript_en.json", diarization="diarization.json", lines="lines.json",
         profile="voices_profile.json", script_json="script.json", script="script_mn.txt", script_en="script_en.txt",
-        warnings="gender_warnings.txt", voices="voices.json", cast="cast.json", dubbed="dubbed.wav",
+        warnings="gender_warnings.txt", voices="voices.json", cast="cast.json", dubbed="dubbed.wav", subs="subtitles_mn.srt",
         final=f"{name}_mn.mp4").items()}
     print(f"work dir: {work}  (device: {device})")
 
@@ -117,7 +125,8 @@ def main():
     # separate
     if stems and todo("separate", f["vocals"], f["background"]):
         from dubflow import media
-        timed(media.separate, f["original"], f["vocals"], f["background"], device)
+        with gpu_lock(device):
+            timed(media.separate, f["original"], f["vocals"], f["background"], device)
 
     # transcribe
     if todo("transcribe", f["transcript"]):
@@ -136,13 +145,15 @@ def main():
             turns = analyze.import_turns(load_json(args.diarization), args.start or 0, args.end)
             save_json(f["diarization"], turns)
             print(f"      imported {len(turns)} turns from {args.diarization}")
-        elif f["diarization"].exists() and "analyze" not in args.redo:
+        elif f["diarization"].exists():  # kept across --redo analyze; delete diarization.json to re-diarize
             turns = load_json(f["diarization"])
         else:
-            turns = timed(analyze.diarize, audio, device, args.num_speakers)
+            with gpu_lock(device):
+                turns = timed(analyze.diarize, audio, device, args.num_speakers)
             save_json(f["diarization"], turns)
         lines = analyze.build_lines(load_json(f["transcript"])["words"], turns)
-        timed(analyze.add_features, lines, audio, device)
+        with gpu_lock(device):
+            timed(analyze.add_features, lines, audio, device)
         profile = analyze.profile([l for l in lines if l["voice"] != "SFX"], "voice")
         save_json(f["lines"], lines)
         save_json(f["profile"], profile)
@@ -155,7 +166,8 @@ def main():
         from dubflow import script
         audio = voice_src if args.model.startswith("gemini") else None
         lines = timed(script.write_script, load_json(f["lines"]), film, load_json(f["profile"]), args.model, audio,
-                      chunk_size=args.chunk, polish_model=args.polish_model)
+                      chunk_size=args.chunk, polish_model=args.polish_model, draft_workers=args.translate_workers,
+                      polish_workers=args.polish_workers, effort=args.effort)
         save_json(f["script_json"], lines)
         write_script(f["script"], lines, "mn")
         write_script(f["script_en"], lines, "en")
@@ -203,12 +215,17 @@ def main():
     timed(dub.mix, clips, f["dubbed"], duck, original=f["original"],
           vocals=f["vocals"] if stems else None, background=f["background"] if stems else None)
     print(f"      {f['dubbed'].with_suffix('.mp3')}")
+    from dubflow import subtitles  # timed to the real length of every dub line
+    spoken = dub.spoken_lines(lines)
+    subtitles.write_srt(subtitles.cues(spoken, [len(c[1]) / MIX_RATE for c in clips]), f["subs"])
+    print(f"      {f['subs']}")
 
     if last < STAGES.index("mux"):
         return
     print("\n== mux")
     from dubflow import media
-    timed(media.mux, video, f["dubbed"], f["final"])
+    subs = f["subs"] if f["subs"].exists() else None
+    timed(media.mux, video, f["dubbed"], f["final"], subs, args.subs)
     print(f"      done: {f['final']}")
 
 

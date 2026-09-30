@@ -209,6 +209,10 @@ details.film .film-actions { display: flex; gap: 8px; flex-wrap: wrap; }
   justify-content: space-between; flex-wrap: wrap;
 }
 .dubbar[hidden] { display: none; }
+.dubgo { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+.subs-pick { display: flex; gap: 8px; align-items: center; font-size: 14px; color: var(--muted); }
+.subs-pick select { width: auto; padding: 8px; }
+video::cue { font-family: var(--font); font-size: 0.95em; background: rgb(0 0 0 / .6); }
 
 dialog { border: 1px solid var(--line); border-radius: 14px; padding: 22px; max-width: 460px; width: calc(100% - 32px); background: var(--panel); color: var(--ink); }
 dialog::backdrop { background: rgb(10 14 20 / .45); }
