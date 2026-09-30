@@ -24,6 +24,7 @@ After editing script_mn.txt (text or speaker names) just run the same command ag
 new names, dub only generates lines whose text or voice changed.
 """
 import argparse
+import json
 import re
 import sys
 import time
@@ -66,6 +67,10 @@ def build_parser():
     ap.add_argument("--subs", choices=["soft", "burn", "none"], default="soft",
                     help="Mongolian subtitles in the final video: soft = a track viewers can switch off, "
                          "burn = drawn into the picture (always visible, re-encodes the video), none")
+    ap.add_argument("--watermark", type=Path, help="logo image (PNG with transparency) to put on the final video")
+    ap.add_argument("--watermark-style", default="{}",
+                    help='JSON placement, e.g. {"auto": false, "x": 0.8, "y": 0.06, "size": 0.3, "opacity": 0.8, '
+                         '"box": true, "cover": true}; default: over the video\'s own logo (see dubflow/media.py)')
     ap.add_argument("--distance", choices=["close", "medium", "far"], default="medium",
                     help="mic distance feel of the dub voices")
     ap.add_argument("--duck", type=float, help="original voice level under dub lines (default 0 with stems, 0.05 without)")
@@ -225,7 +230,8 @@ def main():
     print("\n== mux")
     from dubflow import media
     subs = f["subs"] if f["subs"].exists() else None
-    timed(media.mux, video, f["dubbed"], f["final"], subs, args.subs)
+    timed(media.mux, video, f["dubbed"], f["final"], subs, args.subs, logo=args.watermark,
+          logo_style=json.loads(args.watermark_style))
     print(f"      done: {f['final']}")
 
 

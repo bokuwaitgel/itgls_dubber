@@ -20,7 +20,7 @@ def cues(lines, durations=None):
     out = []
     for i, line in enumerate(lines):
         text = text_of(line)
-        if not text:
+        if not any(c.isalnum() for c in text):  # nothing said: "..." alone gets no subtitle
             continue
         said = durations[i] if durations else max(line["end"] - line["start"], len(text) / READ_CPS)
         out.append([line["start"], line["start"] + max(said, MIN_SEC), text])

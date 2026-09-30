@@ -60,6 +60,28 @@ def _lock_file(f, lock):
         fcntl.flock(f, (fcntl.LOCK_EX | fcntl.LOCK_NB) if lock else fcntl.LOCK_UN)
 
 
+def h264_encoder():
+    """GPU H.264 when this machine has NVENC (several times faster than the CPU), else x264."""
+    probe = subprocess.run([FFMPEG, "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.2",
+                            "-c:v", "h264_nvenc", "-f", "null", "-"], capture_output=True)
+    if probe.returncode == 0:
+        return ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "21", "-b:v", "0"]
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+
+
+def clip(video, out, start, end):
+    """A piece of a finished video with all its streams (picture, dub, subtitle track). From 0:00 the streams are
+    copied (instant); a later start is re-encoded so the clip begins exactly there, not at the previous keyframe."""
+    out = Path(out)
+    part = out.with_name(out.stem + ".part" + out.suffix)
+    if start <= 0:
+        ffmpeg("-i", video, "-t", end, "-map", "0", "-c", "copy", "-movflags", "+faststart", part)
+    else:
+        ffmpeg("-ss", start, "-i", video, "-t", end - start, "-map", "0:v:0", "-map", "0:a:0", "-map", "0:s?",
+               *h264_encoder(), "-c:a", "aac", "-b:a", "192k", "-c:s", "mov_text", "-movflags", "+faststart", part)
+    part.replace(out)
+
+
 def ffmpeg(*args):
     subprocess.run([FFMPEG, "-v", "error", "-y", *map(str, args)], check=True)
 

@@ -23,6 +23,7 @@ TTS_RATE = 24000
 STABILITY = 0.5
 WORKERS = 4  # parallel TTS requests (ElevenLabs concurrency limit depends on the plan)
 MAX_TEMPO = 1.35  # fastest speed-up allowed to fit a line before the next one starts
+MIN_SLOT = 0.3  # seconds; a line timed at zero length (transcription glitch) still gets a real slot
 LINE_RMS = 0.1  # loudness every dub line is leveled to (about -20 dBFS), times --dub-gain
 FADE = 0.15  # seconds of ramp into/out of ducking
 MIX_CHUNK = 60.0  # seconds mixed per step
@@ -46,7 +47,8 @@ def _cache_path(cache, text, voice_id, stability):
 
 
 def spoken_lines(script):
-    return [l for l in script if TAG.sub("", l["text"]).strip()]  # sound-only lines aren't voiced
+    """Lines with words to say: sound-only ("[laughs]") and punctuation-only ("...", "—") lines aren't voiced."""
+    return [l for l in script if any(c.isalnum() for c in TAG.sub("", l["text"]))]
 
 
 def estimate(script, voices, cache, stability=STABILITY):
@@ -112,7 +114,7 @@ def render(script, voices, cache, seg_dir, stability=STABILITY, dub_gain=1.3, di
 
         # Speed up (never slow down) so the line ends before the next one starts.
         next_start = lines[i + 1]["start"] if i + 1 < len(lines) else line["start"] + 60
-        slot = max(next_start - line["start"] - 0.05, line["end"] - line["start"])
+        slot = max(next_start - line["start"] - 0.05, line["end"] - line["start"], MIN_SLOT)
         tempo = min(max(sf.info(str(path)).duration / slot, 1.0), MAX_TEMPO)
         f = 2 ** (pitch / 12)  # pitch shift that keeps duration lets one voice cover another character
         shift = f"asetrate={TTS_RATE * f:.0f},aresample={TTS_RATE},atempo={1 / f:.4f}," if pitch else ""

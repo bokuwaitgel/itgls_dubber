@@ -170,6 +170,7 @@ function showNew() {
       <label class="field">Mongolian subtitles on the video
         <small>Always visible also hides English subtitles already in the video under a dark bar.</small>
         <select name="subs">${subsOptions(d.subs)}</select></label>
+      ${c.has_logo ? `<label class="check"><input type="checkbox" name="watermark"> Add my watermark (over the video's own logo; adjust it later on the job page)</label>` : ""}
       <div class="pair">
         <label class="field">Clip start <small>Try a few minutes first. Empty = from the beginning.</small>
           <input name="start" placeholder="e.g. 2:00" inputmode="numeric"></label>
@@ -236,6 +237,7 @@ function showNew() {
         tts_model: form.tts_model.value.trim(), stability: form.stability.value, distance: form.distance.value,
         num_speakers: form.num_speakers.value, no_separate: form.no_separate.checked,
         translate_workers: form.translate_workers.value, effort: form.effort.value, subs: form.subs.value,
+        watermark: form.watermark && form.watermark.checked ? { ...d.watermark, enabled: true } : null,
       };
     } catch (err) {
       return toast(err instanceof SyntaxError ? `Film profile isn't valid JSON: ${err.message}` : err.message);
@@ -321,7 +323,7 @@ function renderJob() {
   const mode = jobMode(j);
   if (mode !== S.mode) {
     S.mode = mode;
-    $("#jfilm").innerHTML = mode === "active" ? "" : filmPanel();
+    $("#jfilm").innerHTML = mode === "active" ? "" : (j.has_final ? clipPanel() : "") + (j.has_script ? wmPanel() : "") + filmPanel();
     const body = $("#jbody");
     if (mode === "active") body.innerHTML = runPanel();
     else if (mode === "problem") body.innerHTML = problemPanel() + logPanel();
@@ -369,6 +371,18 @@ function problemPanel() {
 function logPanel() {
   return `<details class="film"><summary>Log</summary><pre class="log">${esc(S.job.log.join("\n"))}</pre></details>`;
 }
+function clipPanel() {
+  return `<details class="film" id="clipbox"><summary>Cut a clip</summary>
+    <p class="muted">Download a piece of the Mongolian video, with its dub and subtitles.</p>
+    <div class="clip-row">
+      <label class="field">From <input id="clipstart" value="0:00" inputmode="numeric"></label>
+      <label class="field">To <input id="clipend" value="10:00" inputmode="numeric"></label>
+      <a class="button" id="clipgo" href="#">Download clip</a>
+    </div>
+    <p class="hint">From 0:00 it's ready at once. A later start takes a minute or so, because the video is re-cut exactly there.</p>
+  </details>`;
+}
+
 function filmPanel() {
   return `<details class="film" id="filmbox"><summary>Film profile</summary>
     <p class="muted">Names, who is who and how characters address each other. The translator reads this. After changing it,
@@ -401,6 +415,17 @@ document.addEventListener("click", async e => {
     clearTimeout(S.poll);
     await refreshJobs();
     showJob(j.id);
+  } catch (err) { toast(err.message); }
+});
+
+document.addEventListener("click", e => {
+  if (e.target.id !== "clipgo") return;
+  e.preventDefault();
+  try {
+    const start = parseTime($("#clipstart").value) || 0, end = parseTime($("#clipend").value);
+    if (end === null || end <= start) throw new Error("The end must be after the start.");
+    location.href = `/api/jobs/${S.job.id}/clip?start=${start}&end=${end}`;
+    toast("Cutting the clip. The download starts when it's ready.");
   } catch (err) { toast(err.message); }
 });
 
@@ -472,7 +497,7 @@ function renderEditor() {
       <div class="tools">
         <input type="search" id="q" placeholder="Search the English or Mongolian" aria-label="Search lines">
         <select id="who" aria-label="Show lines of"><option value="">Everyone</option>${speakerOpts}</select>
-        <label class="check"><input type="checkbox" id="follow" checked> Follow video</label>
+        <label class="check" title="Scroll the script to the line being played"><input type="checkbox" id="follow"> Follow video</label>
         <span class="save-state" id="savestate">${sc.lines.length} lines</span>
       </div>
       <div class="rows" id="rows">${sc.lines.map(rowHtml).join("")}</div>
@@ -568,7 +593,9 @@ function playLine(i) {
 }
 
 function wireEditor() {
-  const v = $("#vid"), rows = $("#rows");
+  const v = $("#vid"), rows = $("#rows"), follow = $("#follow");
+  try { follow.checked = localStorage.getItem("dub-follow") === "1"; } catch { /* storage blocked: stay off */ }
+  follow.addEventListener("change", () => { try { localStorage.setItem("dub-follow", follow.checked ? "1" : "0"); } catch { /* ignore */ } });
   v.addEventListener("loadedmetadata", placeReel);
   v.addEventListener("timeupdate", () => {
     const t = v.currentTime;
@@ -759,6 +786,187 @@ async function startDub() {
     showJob(j.id);
   } catch (err) { toast(err.message); }
 }
+
+// ---- watermark editor: drag the logo on a real frame of the video
+function wmPanel() {
+  return `<details class="film" id="wmbox"><summary>Watermark</summary>
+    <label class="check"><input type="checkbox" id="wm-on"> Add a watermark to the final video</label>
+    <div class="wm-edit">
+      <div class="wm-stage" id="wmstage">
+        <img id="wmframe" alt="A frame of the video">
+        <div class="wm-spot" id="wmspot" hidden title="The video's own logo"></div>
+        <div class="wm-mark" id="wmmark" title="Drag to move"><img id="wmlogo" alt="Your watermark" draggable="false"></div>
+      </div>
+      <div class="wm-controls">
+        <div class="wm-presets" role="group" aria-label="Place the watermark">
+          <button type="button" class="ghost" data-wm="auto">Over the video's logo</button>
+          <button type="button" class="ghost" data-wm="tl">Top left</button>
+          <button type="button" class="ghost" data-wm="tr">Top right</button>
+          <button type="button" class="ghost" data-wm="bl">Bottom left</button>
+          <button type="button" class="ghost" data-wm="br">Bottom right</button>
+        </div>
+        <label class="field">Size <input type="range" id="wm-size" min="0.08" max="0.9" step="0.01"></label>
+        <label class="field">Opacity <input type="range" id="wm-opacity" min="0.1" max="1" step="0.05"></label>
+        <label class="check"><input type="checkbox" id="wm-blur"> Blur behind it</label>
+        <label class="check"><input type="checkbox" id="wm-box"> Dark box behind it</label>
+        <label class="check"><input type="checkbox" id="wm-cover"> Hide the video's own logo</label>
+        <p class="hint" id="wm-spotnote">Looking for the video's own logo…</p>
+        <div class="film-actions">
+          <button type="button" id="wm-save">Save watermark</button>
+          <button type="button" class="ghost" id="wm-frame">Show another frame</button>
+          <label class="button ghost">Change image<input type="file" id="wm-file" accept="image/png" hidden></label>
+        </div>
+        <p class="hint">Drag the logo to place it anywhere. Saved settings are used the next time the video is built:
+          press Rebuild the video (no credits).</p>
+      </div>
+    </div>
+  </details>`;
+}
+
+const WM = { spot: undefined, job: null, frameAt: 0 };
+
+async function wmOpen() {
+  const j = S.job;
+  S.wm = { ...S.config.defaults.watermark, ...(j.options && j.options.watermark) };
+  $("#wm-on").checked = S.wm.enabled;
+  $("#wm-size").value = S.wm.size;
+  $("#wm-opacity").value = S.wm.opacity;
+  $("#wm-box").checked = S.wm.box;
+  $("#wm-blur").checked = S.wm.blur;
+  $("#wm-cover").checked = S.wm.cover;
+  const logo = $("#wmlogo");
+  logo.onload = wmRender;
+  logo.onerror = () => { $("#wm-spotnote").textContent = "No watermark image yet: use Change image to upload a PNG."; };
+  logo.src = `/api/logo?t=${Date.now()}`;
+  WM.frameAt = 0;
+  wmFrame();
+  if (WM.job !== j.id) {
+    WM.job = j.id;
+    WM.spot = null;
+    try {
+      WM.spot = (await api(`/api/jobs/${j.id}/logo-spot`)).box;
+      $("#wm-spotnote").textContent = WM.spot
+        ? "The dashed frame shows the video's own logo."
+        : "This video has no fixed logo of its own, so Over the video's logo puts yours where you last placed it.";
+    } catch { $("#wm-spotnote").textContent = "Couldn't look for the video's own logo."; }
+  } else if (WM.spot !== undefined) {
+    $("#wm-spotnote").textContent = WM.spot ? "The dashed frame shows the video's own logo." : "This video has no fixed logo of its own.";
+  }
+  wmRender();
+}
+
+function wmFrame() {
+  const dur = ($("#vid") && $("#vid").duration) || 600;
+  WM.frameAt = WM.frameAt ? (WM.frameAt + dur * 0.13) % dur : Math.min(30, dur / 3);
+  const img = $("#wmframe");
+  img.onload = wmRender;
+  img.src = `/api/jobs/${S.job.id}/frame?at=${WM.frameAt.toFixed(1)}`;
+}
+
+// Same geometry as _watermark_graph in dubflow/media.py, in stage pixels.
+function wmGeometry() {
+  const st = S.wm, stage = $("#wmstage"), W = stage.clientWidth, H = stage.clientHeight, logo = $("#wmlogo");
+  const ratio = logo.naturalWidth ? logo.naturalHeight / logo.naturalWidth : 1 / 3;
+  const lw = st.size * W, lh = lw * ratio, pad = lh * 0.25;
+  let bw = lw + 2 * pad, bh = lh + 2 * pad, cx = st.x * W, cy = st.y * H, spot = null;
+  if (WM.spot) {
+    const [x0, y0, x1, y1] = WM.spot;
+    spot = { x0: Math.max(0, x0 - 0.05) * W, x1: Math.min(1, x1 + 0.05) * W,
+             y0: Math.max(0, y0 - 0.012) * H, y1: Math.min(1, y1 + 0.012) * H };
+    if (st.auto) {
+      cx = (spot.x0 + spot.x1) / 2;
+      cy = (spot.y0 + spot.y1) / 2;
+      if (st.box || st.blur) { bw = Math.max(bw, spot.x1 - spot.x0); bh = Math.max(bh, spot.y1 - spot.y0); }
+    }
+  }
+  const bx = Math.min(Math.max(cx - bw / 2, 0), W - bw), by = Math.min(Math.max(cy - bh / 2, 0), H - bh);
+  return { W, H, lw, bw, bh, bx, by, spot };
+}
+
+function wmRender() {
+  if (!$("#wmstage") || !S.wm) return;
+  const st = S.wm, g = wmGeometry(), mark = $("#wmmark"), spotEl = $("#wmspot");
+  $(".wm-edit").classList.toggle("off", !st.enabled);
+  Object.assign(mark.style, { left: `${g.bx}px`, top: `${g.by}px`, width: `${g.bw}px`, height: `${g.bh}px`,
+    background: st.box ? `rgb(0 0 0 / ${(st.blur ? 0.3 : 0.55) * st.opacity})` : "transparent",
+    backdropFilter: st.blur ? "blur(8px)" : "none" });
+  Object.assign($("#wmlogo").style, { width: `${g.lw}px`, opacity: st.opacity });
+  spotEl.hidden = !g.spot;
+  if (g.spot) {
+    Object.assign(spotEl.style, { left: `${g.spot.x0}px`, top: `${g.spot.y0}px`,
+      width: `${g.spot.x1 - g.spot.x0}px`, height: `${g.spot.y1 - g.spot.y0}px` });
+    spotEl.classList.toggle("covered", st.cover);
+  }
+  $$(".wm-presets button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.wm === "auto" && st.auto)));
+}
+
+function wmPreset(name) {
+  const st = S.wm;
+  if (name === "auto") { st.auto = true; return wmRender(); }
+  st.auto = false;
+  const g = wmGeometry(), mx = 0.03, my = 0.03 * g.W / g.H;
+  const hx = g.bw / 2 / g.W, hy = g.bh / 2 / g.H;
+  st.x = name.includes("l") ? mx + hx : 1 - mx - hx;
+  st.y = name.includes("t") ? my + hy : 1 - my - hy;
+  wmRender();
+}
+
+document.addEventListener("toggle", e => { if (e.target.id === "wmbox" && e.target.open) wmOpen(); }, true);
+window.addEventListener("resize", wmRender);
+
+document.addEventListener("input", e => {
+  if (!S.wm) return;
+  const id = e.target.id;
+  if (id === "wm-size") S.wm.size = +e.target.value;
+  else if (id === "wm-opacity") S.wm.opacity = +e.target.value;
+  else if (id === "wm-box") S.wm.box = e.target.checked;
+  else if (id === "wm-blur") S.wm.blur = e.target.checked;
+  else if (id === "wm-cover") S.wm.cover = e.target.checked;
+  else if (id === "wm-on") S.wm.enabled = e.target.checked;
+  else return;
+  wmRender();
+});
+
+document.addEventListener("click", async e => {
+  const preset = e.target.closest("[data-wm]");
+  if (preset) return wmPreset(preset.dataset.wm);
+  if (e.target.id === "wm-frame") return wmFrame();
+  if (e.target.id !== "wm-save") return;
+  try {
+    S.job = { ...S.job, ...(await api(`/api/jobs/${S.job.id}/options`, { method: "PUT", json: { watermark: S.wm } })) };
+    toast(S.wm.enabled ? "Watermark saved. Rebuild the video to apply it." : "Watermark turned off. Rebuild the video to apply it.");
+  } catch (err) { toast(err.message); }
+});
+
+document.addEventListener("change", async e => {
+  if (e.target.id !== "wm-file" || !e.target.files[0]) return;
+  const fd = new FormData();
+  fd.append("image", e.target.files[0]);
+  try {
+    const r = await fetch("/api/logo", { method: "PUT", body: fd });
+    if (!r.ok) throw new Error((await r.json()).detail || "Upload failed");
+    S.config.has_logo = true;
+    $("#wmlogo").src = `/api/logo?t=${Date.now()}`;
+    toast("New watermark image saved for all videos");
+  } catch (err) { toast(err.message); }
+});
+
+// drag the logo
+document.addEventListener("pointerdown", e => {
+  if (!e.target.closest("#wmmark") || !S.wm) return;
+  e.preventDefault();
+  const stage = $("#wmstage").getBoundingClientRect(), g = wmGeometry();
+  const offX = e.clientX - stage.left - (g.bx + g.bw / 2), offY = e.clientY - stage.top - (g.by + g.bh / 2);
+  S.wm.auto = false;
+  const move = ev => {
+    S.wm.x = Math.min(1, Math.max(0, (ev.clientX - stage.left - offX) / stage.width));
+    S.wm.y = Math.min(1, Math.max(0, (ev.clientY - stage.top - offY) / stage.height));
+    wmRender();
+  };
+  const up = () => { document.removeEventListener("pointermove", move); document.removeEventListener("pointerup", up); };
+  document.addEventListener("pointermove", move);
+  document.addEventListener("pointerup", up);
+});
 
 // ---- boot
 (async () => {

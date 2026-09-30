@@ -4,6 +4,7 @@ A job goes: queued -> running "prepare" (extract .. cast, no TTS) -> review (scr
 UI) -> queued -> running "dub" (TTS + mix + mux, spends ElevenLabs credits) -> done. The pipeline itself is
 dub_video.py, run as a subprocess so a crash or a stop never takes the server down and GPU memory is freed.
 """
+import json
 import os
 import queue
 import shutil
@@ -44,13 +45,47 @@ _procs = {}  # job id -> running Popen
 
 
 def defaults():
+    from dubflow.media import WATERMARK
     parser = build_parser()
-    return {k: parser.get_default(flag.lstrip("-").replace("-", "_")) for k, (flag, _) in OPTIONS.items()}
+    out = {k: parser.get_default(flag.lstrip("-").replace("-", "_")) for k, (flag, _) in OPTIONS.items()}
+    return {**out, "watermark": {"enabled": False, **WATERMARK}}
+
+
+LOGO_UPLOAD = DATA.parent / "logo.png"  # set from the studio
+DEFAULT_LOGO = ROOT / "watermark-nobackground.png"
+
+
+def logo_path():
+    return next((p for p in (LOGO_UPLOAD, DEFAULT_LOGO) if p.exists()), None)
+
+
+def _clean_watermark(wm):
+    """{"enabled", "auto", "x", "y", "size", "opacity", "box", "cover"} with every value checked."""
+    if not isinstance(wm, dict):
+        raise ValueError("watermark must be an object")
+    base = defaults()["watermark"]
+    out = {}
+    for key, default in base.items():
+        value = wm.get(key, default)
+        if isinstance(default, bool):
+            out[key] = bool(value)
+            continue
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            raise ValueError(f"watermark {key} must be a number")
+        low, high = {"size": (0.05, 1.0), "opacity": (0.1, 1.0)}.get(key, (0.0, 1.0))
+        if not low <= value <= high:
+            raise ValueError(f"watermark {key} must be between {low} and {high}")
+        out[key] = value
+    return out
 
 
 def clean_options(raw):
     """Whitelisted, typed options; empty values dropped. Raises ValueError with a readable message."""
     out = {}
+    if raw.get("watermark"):
+        out["watermark"] = _clean_watermark(raw["watermark"])
     for key, value in raw.items():
         if key not in OPTIONS or value is None or value == "" or value is False:  # 0 is a real value
             continue
@@ -171,8 +206,14 @@ def command(job):
     cmd = [sys.executable, "-u", str(ROOT / "dub_video.py"), str(p["video"]), "--film", str(p["film"]),
            "--work", str(p["work"])]
     for key, value in job["options"].items():
+        if key not in OPTIONS:
+            continue
         flag, kind = OPTIONS[key]
         cmd += [flag] if kind is bool else [flag, str(value)]
+    wm, logo = job["options"].get("watermark") or {}, logo_path()
+    if wm.get("enabled") and logo:
+        style = {k: v for k, v in wm.items() if k != "enabled"}
+        cmd += ["--watermark", str(logo), "--watermark-style", json.dumps(style)]
     cmd += ["--until", "cast"] if job["phase"] == "prepare" else ["--yes"]
     if job["redo"]:
         cmd += ["--redo", *job["redo"]]
@@ -337,6 +378,28 @@ def subtitles_vtt(job):
     """Mongolian captions for the studio player, straight from the script (so edits show at once)."""
     from dubflow import subtitles
     return subtitles.vtt(subtitles.cues(read_script(paths(job)["script"])))
+
+
+def frame_jpeg(job, at):
+    """One frame of the source video as JPEG, for placing the watermark."""
+    from dubflow.common import FFMPEG
+    video = source_video(job)
+    return subprocess.run([FFMPEG, "-v", "error", "-ss", f"{max(0.0, at):.2f}", "-i", str(video), "-frames:v", "1",
+                           "-vf", "scale=540:-2", "-q:v", "4", "-f", "mjpeg", "-"], capture_output=True, check=True).stdout
+
+
+def logo_spot(job):
+    """Where the video's own channel logo is (fractions x0, y0, x1, y1), or None. Worked out once per job."""
+    from dubflow import media
+    cache = paths(job)["work"] / "logo_spot.json"
+    if cache.exists():
+        return load_json(cache)["box"]
+    frames, h = media.sample_frames(source_video(job))
+    box = media.logo_box(frames, h)
+    box = [float(v) for v in box] if box else None
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    save_json(cache, {"box": box})
+    return box
 
 
 def backup_script(job):

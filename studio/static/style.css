@@ -151,6 +151,22 @@ details.adv[open] > .grid3 { margin-top: 14px; }
 
 details.film { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 18px; }
 details.film[open] { display: grid; gap: 12px; }
+.wm-edit { display: grid; grid-template-columns: minmax(0, 320px) minmax(0, 1fr); gap: 20px; align-items: start; }
+.wm-edit.off { opacity: .55; }
+.wm-stage { position: relative; border-radius: 8px; overflow: hidden; background: #000; touch-action: none; user-select: none; }
+.wm-stage > img { display: block; width: 100%; }
+.wm-mark { position: absolute; display: grid; place-items: center; cursor: grab; outline: 1px dashed rgb(255 255 255 / .5); }
+.wm-mark:active { cursor: grabbing; }
+.wm-spot { position: absolute; border: 2px dashed var(--ochre-fill); pointer-events: none; }
+.wm-spot.covered { backdrop-filter: blur(6px) brightness(.65); }
+.wm-controls { display: grid; gap: 12px; }
+.wm-presets { display: flex; flex-wrap: wrap; gap: 6px; }
+.wm-presets button { padding: 7px 10px; font-size: 13px; }
+.wm-presets button[aria-pressed="true"] { background: var(--blue-soft); border-color: var(--blue); }
+input[type="range"] { padding: 0; accent-color: var(--blue); }
+@media (max-width: 800px) { .wm-edit { grid-template-columns: minmax(0, 1fr); } }
+.clip-row { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+.clip-row .field { width: 120px; }
 details.film .film-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
 /* ---- editor */

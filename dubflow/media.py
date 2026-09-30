@@ -5,9 +5,8 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-import torch
 
-from .common import FFMPEG, MIX_RATE, duration, ffmpeg
+from .common import FFMPEG, MIX_RATE, duration, ffmpeg, h264_encoder
 
 SEP_CHUNK = 300.0  # seconds of audio per Demucs pass (bounds RAM on a 2-hour film)
 SEP_PAD = 5.0  # context on both sides of a chunk, cut off afterwards so chunk edges are seamless
@@ -32,6 +31,7 @@ def extract(video, out):
 
 def separate(original, vocals_out, background_out, device):
     """Demucs htdemucs: vocals stem + everything else (music, effects) as background."""
+    import torch
     from demucs.api import Separator
 
     sep = Separator(model="htdemucs", device=device, progress=False)
@@ -66,28 +66,37 @@ def video_size(path):
     return int(w), int(h)
 
 
-def text_band(video, samples=60):
-    """(top, bottom) as fractions of the height where the video already has subtitles burned in, or None.
+SAMPLE_W = 270  # frames are analysed at this width
 
-    Samples frames and counts, per row, white pixels on sharp edges (outlined caption text). Subtitles come and go
-    and change, so a row counts when it has text in some frames; rows with text in nearly every frame are a fixed
-    logo or watermark and are ignored."""
+
+def sample_frames(video, samples=60):
+    """Grey frames spread over the whole video, SAMPLE_W wide: (frames, h)."""
     width, height = video_size(video)
-    w = 270
-    h = int(height * w / width) // 2 * 2
+    h = int(height * SAMPLE_W / width) // 2 * 2
     total = duration(video)
-    rows = []
+    frames = []
     for k in range(samples):
         raw = subprocess.run([FFMPEG, "-v", "error", "-ss", f"{total * (k + 0.5) / samples:.2f}", "-i", str(video),
-                              "-frames:v", "1", "-vf", f"scale={w}:{h},format=gray", "-f", "rawvideo", "-"],
+                              "-frames:v", "1", "-vf", f"scale={SAMPLE_W}:{h},format=gray", "-f", "rawvideo", "-"],
                              capture_output=True).stdout
-        if len(raw) != w * h:
-            continue
-        f = np.frombuffer(raw, np.uint8).reshape(h, w).astype(np.int16)
-        rows.append(((f[:, 1:] > 200) & (np.abs(np.diff(f, axis=1)) > 60)).sum(1) / w)
-    if len(rows) < samples // 2:
+        if len(raw) == SAMPLE_W * h:
+            frames.append(np.frombuffer(raw, np.uint8).reshape(h, SAMPLE_W).astype(np.int16))
+    return frames, h
+
+
+def _text_pixels(f):
+    """White pixels on sharp edges: outlined caption or logo text."""
+    return (f[:, 1:] > 200) & (np.abs(np.diff(f, axis=1)) > 60)
+
+
+def text_band(frames, h):
+    """(top, bottom) as fractions of the height where the video already has subtitles burned in, or None.
+
+    Subtitles come and go and change, so a row counts when it has text in some frames; rows with text in nearly
+    every frame are a fixed logo or watermark and are ignored."""
+    if len(frames) < 20:
         return None
-    rows = np.array(rows)
+    rows = np.array([_text_pixels(f).sum(1) / SAMPLE_W for f in frames])
     present = (rows > 0.03).mean(0)
     score = np.percentile(rows, 75, axis=0) * (present < 0.85)  # constant overlays out
     lo = int(h * 0.45)
@@ -103,53 +112,127 @@ def text_band(video, samples=60):
     return top / h, (bottom + 1) / h
 
 
-def _encoder():
-    """GPU H.264 when this machine has NVENC (several times faster than the CPU), else x264."""
-    probe = subprocess.run([FFMPEG, "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.2",
-                            "-c:v", "h264_nvenc", "-f", "null", "-"], capture_output=True)
-    if probe.returncode == 0:
-        return ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "21", "-b:v", "0"]
-    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"]
+def logo_box(frames, h):
+    """(x0, y0, x1, y1) as fractions of the frame around a channel logo that is in the same place in nearly every
+    frame, near the top or bottom edge; None if there is none."""
+    if len(frames) < 20:
+        return None
+    steady = np.mean([_text_pixels(f) for f in frames], axis=0) > 0.8
+    for y0, y1 in ((int(h * 0.8), h), (0, int(h * 0.2))):  # bottom first: where these channels put theirs
+        ys, xs = np.nonzero(steady[y0:y1])
+        if len(ys) >= 15:
+            return xs.min() / SAMPLE_W, (y0 + ys.min()) / h, (xs.max() + 2) / SAMPLE_W, (y0 + ys.max() + 1) / h
+    return None
 
 
-def _burn_filter(ass_name, width, height, band):
-    """ass subtitles; with `band`, the video's own subtitles there are blurred and darkened first."""
-    if not band:
-        return ["-vf", f"ass={ass_name}"]
-    y = int(band[0] * height) // 2 * 2
-    bh = max(48, int((band[1] - band[0]) * height) // 2 * 2)
-    bar = (f"[0:v]split[v][b];[b]crop=iw:{bh}:0:{y},boxblur=luma_radius=20:luma_power=2:chroma_radius=10,"
-           f"drawbox=x=0:y=0:w=iw:h=ih:color=black@0.45:t=fill[bar];[v][bar]overlay=0:{y},ass={ass_name}[out]")
-    return ["-filter_complex", bar, "-map", "[out]"]
+def _even(v):
+    return int(round(v)) // 2 * 2
 
 
-def mux(video, audio, out, subs=None, mode="soft", cover=True):
-    """Original video with the dubbed audio. With an SRT in `subs`:
-    soft  a Mongolian subtitle track viewers can switch off (video copied, no re-encode)
-    burn  subtitles drawn into the picture, always visible (video re-encoded). With `cover`, subtitles already
-          burned into the video are found, blurred under a dark bar, and the Mongolian ones go on that bar."""
+WATERMARK = {"auto": True, "x": 0.72, "y": 0.955, "size": 0.42, "opacity": 1.0, "box": True, "blur": True,
+             "cover": True}
+
+
+def _watermark_graph(cur, width, height, logo_size, found, style, logo_input):
+    """Filter steps that hide the video's own logo (`cover`) and put ours on it (`auto`) or at x, y (centre, as
+    fractions of the frame), `size` = logo width as a fraction of the frame width. Behind it the video can be
+    blurred (`blur`, frosted glass) and/or darkened (`box`)."""
+    st = {**WATERMARK, **(style or {})}
+    lw = _even(width * st["size"])
+    lh = _even(lw * logo_size[1] / logo_size[0])
+    pad = _even(lh * 0.25)
+    steps = []
+    if found and (st["cover"] or st["auto"]):
+        # thin script logos only half show up in detection: take a generous margin around what was found
+        fx0, fx1 = max(0, found[0] * width - width * 0.05), min(width, found[2] * width + width * 0.05)
+        fy0, fy1 = max(0, found[1] * height - height * 0.012), min(height, found[3] * height + height * 0.012)
+        if st["auto"]:
+            st["x"], st["y"] = (fx0 + fx1) / 2 / width, (fy0 + fy1) / 2 / height
+        if st["cover"]:
+            m = 0
+            x, y = _even(max(0, fx0 - m)), _even(max(0, fy0 - m))
+            w, h = _even(min(width - x, fx1 - fx0 + 2 * m)), _even(min(height - y, fy1 - fy0 + 2 * m))
+            r = max(1, min(min(w, h) // 4, 20))  # boxblur: radius must fit the half-size chroma planes
+            steps.append(f"[{cur}]split[ca][cb];[cb]crop={w}:{h}:{x}:{y},boxblur=luma_radius={r}:chroma_radius={max(1, r // 2)}:"
+                         f"luma_power=2,drawbox=x=0:y=0:w=iw:h=ih:color=black@0.35:t=fill[cov];[ca][cov]overlay={x}:{y}[covered]")
+            cur = "covered"
+    bw, bh = lw + 2 * pad, lh + 2 * pad
+    if st["auto"] and found and (st["box"] or st["blur"]):  # the backing must hide the whole old logo
+        bw, bh = max(bw, _even(fx1 - fx0)), max(bh, _even(fy1 - fy0))
+    bx = _even(min(max(st["x"] * width - bw / 2, 0), width - bw))
+    by = _even(min(max(st["y"] * height - bh / 2, 0), height - bh))
+    lx, ly = bx + (bw - lw) // 2, by + (bh - lh) // 2
+    if st["blur"]:
+        r = max(1, min(min(bw, bh) // 4, 20))  # boxblur: radius must fit the half-size chroma planes
+        steps.append(f"[{cur}]split[ba][bb];[bb]crop={bw}:{bh}:{bx}:{by},boxblur=luma_radius={r}:"
+                     f"chroma_radius={max(1, r // 2)}:luma_power=3[frost];[ba][frost]overlay={bx}:{by}[blurred]")
+        cur = "blurred"
+    if st["box"]:  # lighter over blur: the blur already makes the logo readable
+        alpha = (0.3 if st["blur"] else 0.55) * st["opacity"]
+        steps.append(f"[{cur}]drawbox=x={bx}:y={by}:w={bw}:h={bh}:color=black@{alpha:.2f}:t=fill[boxed]")
+        cur = "boxed"
+    steps.append(f"[{logo_input}:v]scale={lw}:-2,format=rgba,colorchannelmixer=aa={st['opacity']:.2f}[logo];"
+                 f"[{cur}][logo]overlay={lx}:{ly}:shortest=1[marked]")
+    return steps, "marked"
+
+
+def mux(video, audio, out, subs=None, mode="soft", cover=True, logo=None, logo_style=None):
+    """Original video with the dubbed audio, plus optionally:
+
+    subs + mode  soft: a Mongolian subtitle track viewers can switch off.
+                 burn: subtitles drawn into the picture. With `cover`, subtitles already burned into the video
+                 are found, blurred under a dark bar, and the Mongolian ones go on that bar.
+    logo         an image (PNG with transparency) as a watermark, placed by `logo_style` (see WATERMARK and
+                 _watermark_graph): by default over the video's own channel logo on a dark box, hiding that one.
+    Without burn or logo the picture is copied (instant); with either it is re-encoded once."""
     video, audio, out = (Path(p).resolve() for p in (video, audio, out))
-    audio_args = ["-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"]
-    if not subs or mode == "none":
-        ffmpeg("-i", video, "-i", audio, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", *audio_args, _part(out))
-    elif mode == "soft":
-        ffmpeg("-i", video, "-i", audio, "-i", Path(subs).resolve(), "-map", "0:v:0", "-map", "1:a:0", "-map", "2:s:0",
-               "-c:v", "copy", "-c:s", "mov_text", "-metadata:s:s:0", "language=mon", "-metadata:s:s:0", "title=Монгол",
-               "-disposition:s:0", "default", *audio_args, _part(out))
-    else:
-        from .subtitles import read_srt, write_ass
-        ass = Path(subs).with_suffix(".ass")
+    subs = Path(subs).resolve() if subs and mode != "none" else None
+    logo = Path(logo).resolve() if logo else None
+    burn = subs is not None and mode == "burn"
+    args = ["-i", str(video), "-i", str(audio)]
+    maps = ["-map", "1:a:0"]
+    cwd = None
+    if burn or logo:
         width, height = video_size(video)
-        band = text_band(video) if cover else None
-        if band:
-            pad = 0.012
-            band = (max(0.0, band[0] - pad), min(1.0, band[1] + pad))
-            print(f"      covering the video's own subtitles at {band[0]:.0%}-{band[1]:.0%} of the height", flush=True)
-        band = write_ass(read_srt(subs), ass, width, height, band)
-        video_args = _burn_filter(ass.name, width, height, band)
-        if video_args[0] == "-vf":
-            video_args[:0] = ["-map", "0:v:0"]
-        # The ass filter takes a bare file name: run from its folder so Windows drive colons need no escaping.
-        subprocess.run([FFMPEG, "-v", "error", "-y", "-i", str(video), "-i", str(audio), *video_args, "-map", "1:a:0",
-                        *_encoder(), *audio_args, str(_part(out))], check=True, cwd=ass.parent)
+        frames, h = sample_frames(video)
+        graph, cur = [], "0:v"
+        if burn:
+            from .subtitles import read_srt, write_ass
+            band = text_band(frames, h) if cover else None
+            if band:
+                band = (max(0.0, band[0] - 0.012), min(1.0, band[1] + 0.012))
+                print(f"      covering the video's own subtitles at {band[0]:.0%}-{band[1]:.0%} of the height", flush=True)
+            ass = subs.with_suffix(".ass")
+            band = write_ass(read_srt(subs), ass, width, height, band)
+            if band:
+                y, bh = _even(band[0] * height), max(48, _even((band[1] - band[0]) * height))
+                graph.append(f"[{cur}]split[sa][sb];[sb]crop=iw:{bh}:0:{y},boxblur=luma_radius=20:luma_power=2:"
+                             f"chroma_radius=10,drawbox=x=0:y=0:w=iw:h=ih:color=black@0.45:t=fill[bar];"
+                             f"[sa][bar]overlay=0:{y}[subbed]")
+                cur = "subbed"
+        if logo:
+            st = {**WATERMARK, **(logo_style or {})}
+            found = logo_box(frames, h) if st["auto"] or st["cover"] else None
+            print(f"      watermark{' over the video’s own logo' if found and st['auto'] else ''}"
+                  f"{'; the video’s own logo hidden' if found and st['cover'] else ''}", flush=True)
+            args += ["-loop", "1", "-i", str(logo)]
+            steps, cur = _watermark_graph(cur, width, height, video_size(logo), found, st, 2)
+            graph += steps
+        if burn:
+            # The ass filter takes a bare file name: run from its folder so Windows drive colons need no escaping.
+            graph.append(f"[{cur}]ass={ass.name}[subs]")
+            cur, cwd = "subs", ass.parent
+        args += ["-filter_complex", ";".join(graph)]
+        maps = ["-map", f"[{cur}]"] + maps
+        codec = h264_encoder()
+    else:
+        maps = ["-map", "0:v:0"] + maps
+        codec = ["-c:v", "copy"]
+    if subs and not burn:
+        args += ["-i", str(subs)]
+        maps += ["-map", f"{args.count('-i') - 1}:s:0"]
+        codec += ["-c:s", "mov_text", "-metadata:s:s:0", "language=mon", "-metadata:s:s:0", "title=Монгол",
+                  "-disposition:s:0", "default"]
+    subprocess.run([FFMPEG, "-v", "error", "-y", *args, *maps, *codec, "-c:a", "aac", "-b:a", "192k",
+                    "-movflags", "+faststart", str(_part(out))], check=True, cwd=cwd)
     _part(out).replace(out)

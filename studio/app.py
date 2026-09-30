@@ -5,6 +5,7 @@ import html
 import json
 import os
 import shutil
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,7 +14,7 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFil
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from dubflow.common import ROOT, load_json, save_json
+from dubflow.common import ROOT, clip as cut_clip, duration, load_json, save_json
 
 from . import jobs
 
@@ -125,7 +126,7 @@ def index():
 
 @app.get("/api/config")
 def config():
-    return {"defaults": jobs.defaults(), "distances": jobs.DISTANCES, "efforts": jobs.EFFORTS, "login": bool(_password()),
+    return {"defaults": jobs.defaults(), "has_logo": jobs.logo_path() is not None, "distances": jobs.DISTANCES, "efforts": jobs.EFFORTS, "login": bool(_password()),
             "missing_keys": [k for k in KEYS if not os.getenv(k)],
             "films": sorted(p.stem for p in FILMS.glob("*.json"))}
 
@@ -279,6 +280,63 @@ def put_voices(jid: str, body: dict = Body(...)):
     except (TypeError, ValueError) as e:
         raise _bad(e)
     return {"voices": voices, "estimate": jobs.estimate(job)}
+
+
+_clip_lock = threading.Lock()
+
+
+@app.get("/api/jobs/{jid}/clip")
+def clip(jid: str, start: float = 0, end: float = 600):
+    """Download a piece of the Mongolian video (default: the first 10 minutes). Cut once, then reused until the
+    video is rebuilt."""
+    job = _job(jid)
+    final = jobs.final_video(job)
+    if not final:
+        raise HTTPException(404, "There is no Mongolian video yet. Dub the film first.")
+    end = min(end, duration(final))
+    if start < 0 or end - start < 1:
+        raise HTTPException(400, "The clip must start at 0:00 or later and end at least a second after it starts.")
+    out = jobs.paths(job)["work"] / "clips" / f"clip_{round(start * 10)}-{round(end * 10)}.mp4"
+    with _clip_lock:
+        if not out.exists() or out.stat().st_mtime < final.stat().st_mtime:
+            out.parent.mkdir(exist_ok=True)
+            cut_clip(final, out, start, end)
+    stamp_ = lambda t: f"{int(t // 60)}-{int(t % 60):02d}"
+    return FileResponse(out, media_type="video/mp4",
+                        filename=f"{job['title']} (Mongolian) {stamp_(start)} to {stamp_(end)}.mp4")
+
+
+@app.get("/api/logo")
+def get_logo():
+    path = jobs.logo_path()
+    if not path:
+        raise HTTPException(404, "No watermark image yet. Upload one.")
+    return FileResponse(path, headers={"Cache-Control": "no-store"})
+
+
+@app.put("/api/logo")
+def put_logo(image: UploadFile = File(...)):
+    """New watermark image for every job from now on (PNG with a transparent background works best)."""
+    data = image.file.read(20 * 1024 * 1024 + 1)
+    if len(data) > 20 * 1024 * 1024 or not data.startswith(b"\x89PNG"):
+        raise HTTPException(400, "Upload a PNG image under 20 MB (a transparent background looks best).")
+    jobs.LOGO_UPLOAD.parent.mkdir(parents=True, exist_ok=True)
+    jobs.LOGO_UPLOAD.write_bytes(data)
+    return {"saved": True}
+
+
+@app.get("/api/jobs/{jid}/frame")
+def frame(jid: str, at: float = 10.0):
+    job = _job(jid)
+    try:
+        return Response(jobs.frame_jpeg(job, at), media_type="image/jpeg")
+    except Exception:
+        raise HTTPException(404, "Couldn't read a frame at that time.")
+
+
+@app.get("/api/jobs/{jid}/logo-spot")
+def logo_spot(jid: str):
+    return {"box": jobs.logo_spot(_job(jid))}
 
 
 @app.get("/api/jobs/{jid}/video/{kind}")

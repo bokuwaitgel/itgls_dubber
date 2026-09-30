@@ -60,6 +60,13 @@ the final video pick one, on the upload form or next to the dub button (then reb
   video (on the GPU when there is one).
 - **None**.
 
+Watermark: open **Watermark** on a job page. Drag your logo anywhere on a frame of the video, or use a preset
+(**Over the video's logo** hides the channel's own logo under yours, like a sticker). Set size, opacity, a blur and a dark
+box behind it; **Hide the video's own logo** blurs the channel logo even when yours sits somewhere else. Save, then
+**Rebuild the video** (no credits). **Change image** replaces the logo for all videos (PNG with transparency); until
+then `watermark-nobackground.png` is used. Command line: `--watermark logo.png --watermark-style '{"auto": false,
+"x": 0.8, "y": 0.06, "size": 0.3}'`.
+
 On the command line: `--subs soft|burn|none`. `subtitles_mn.srt` in the work folder has the subtitles timed to the
 dub.
 
