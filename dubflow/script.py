@@ -17,7 +17,7 @@ from pydantic import BaseModel
 from .analyze import age_group, gender_word
 from .common import FFMPEG, ROOT, TAG
 
-MODEL = "gpt-5.4-mini"
+MODEL = "gpt-6-luna"
 CHUNK = 40  # lines per request
 MIN_CHUNK = 5  # a failing chunk is halved down to this size before giving up
 CONTEXT = 15  # previous translated lines shown with each chunk

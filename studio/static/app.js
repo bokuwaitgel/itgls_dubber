@@ -38,6 +38,7 @@ async function api(path, opts = {}) {
     init.headers["Content-Type"] = "application/json";
   }
   const r = await fetch(path, init);
+  if (r.status === 401) { location.href = "/login"; throw new Error("Sign in first."); }
   const data = (r.headers.get("content-type") || "").includes("json") ? await r.json() : null;
   if (!r.ok) {
     const d = data && data.detail;
@@ -256,6 +257,7 @@ function upload(fd, onProgress) {
     x.open("POST", "/api/jobs");
     x.upload.onprogress = e => e.lengthComputable && onProgress(e.loaded / e.total);
     x.onload = () => {
+      if (x.status === 401) { location.href = "/login"; return; }
       let d = null;
       try { d = JSON.parse(x.responseText); } catch { /* not JSON */ }
       x.status < 300 ? resolve(d) : reject(new Error((d && d.detail) || `Upload failed (${x.status})`));
@@ -729,6 +731,7 @@ async function startDub() {
     main().innerHTML = `<div class="notice error"><strong>Can't reach the server: ${esc(e.message)}</strong></div>`;
     return;
   }
+  if (S.config.login) $(".side").insertAdjacentHTML("beforeend", `<a class="signout" href="/logout">Sign out</a>`);
   await refreshJobs();
   setInterval(refreshJobs, 4000);
   window.addEventListener("hashchange", route);

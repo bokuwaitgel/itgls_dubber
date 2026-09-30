@@ -50,7 +50,8 @@ python -m studio            # http://127.0.0.1:8000
    Lines that were already voiced are cached, so after an edit only the changed lines cost credits.
 5. Switch the player to **Mongolian dub** to check it, then download.
 
-To use it from other computers, set `DUB_PASSWORD` in `.env` and run `python -m studio --host 0.0.0.0`. The server
+With `DUB_PASSWORD` in `.env` the studio shows a sign-in page. To use it from other computers, set it and run
+`python -m studio --host 0.0.0.0`. The server
 refuses to listen on the network without a password, because anyone who can open the page can spend your credits.
 
 Films dubbed earlier with the command line can be added to the studio:

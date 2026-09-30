@@ -1,14 +1,16 @@
 """Web UI + JSON API over the dub pipeline. Run it with `python -m studio` (see README.md)."""
-import base64
+import hashlib
 import hmac
+import html
 import json
 import os
 import shutil
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from dubflow.common import ROOT, load_json, save_json
@@ -18,6 +20,27 @@ from . import jobs
 STATIC = Path(__file__).parent / "static"
 FILMS = ROOT / "films"
 KEYS = ["ELEVENLABS_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY", "HF_TOKEN"]
+COOKIE = "dub_session"
+SESSION_DAYS = 30
+PUBLIC = ("/login", "/static/")  # reachable without signing in
+
+LOGIN_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Sign in: Dub Studio</title>
+<link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css"></head>
+<body><main class="login"><form method="post" action="/login" class="panel">
+<h1>Dub Studio</h1><p class="muted">Enter the studio password (DUB_PASSWORD in .env).</p>
+{error}<label class="field">Password<input type="password" name="password" autocomplete="current-password" required autofocus></label>
+<button type="submit">Sign in</button></form></main></body></html>"""
+
+
+def _password():
+    return os.getenv("DUB_PASSWORD") or ""
+
+
+def _token(password):
+    """Session value derived from the password: changing DUB_PASSWORD signs everyone out."""
+    return hmac.new(password.encode(), b"dub-studio-session", hashlib.sha256).hexdigest()
 
 
 @asynccontextmanager
@@ -31,21 +54,43 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
 
 @app.middleware("http")
-async def basic_auth(request: Request, call_next):
-    """HTTP Basic auth when DUB_PASSWORD is set (required when the server listens beyond localhost)."""
-    password = os.getenv("DUB_PASSWORD")
-    if password:
-        user, given = "", ""
-        header = request.headers.get("authorization", "")
-        if header.startswith("Basic "):
-            try:
-                user, _, given = base64.b64decode(header[6:]).decode().partition(":")
-            except ValueError:
-                pass
-        if not (hmac.compare_digest(given.encode(), password.encode())
-                and hmac.compare_digest(user.encode(), os.getenv("DUB_USER", "dub").encode())):
-            return Response(status_code=401, headers={"WWW-Authenticate": 'Basic realm="Dub Studio"'})
+async def require_login(request: Request, call_next):
+    """With DUB_PASSWORD set (required beyond localhost), everything but the login page needs a session cookie."""
+    password = _password()
+    path = request.url.path
+    if password and not path.startswith(PUBLIC):
+        if not hmac.compare_digest(request.cookies.get(COOKIE, ""), _token(password)):
+            if path.startswith("/api/"):
+                return JSONResponse({"detail": "Sign in first."}, status_code=401)
+            return RedirectResponse("/login", status_code=303)
     return await call_next(request)
+
+
+@app.get("/login", response_class=HTMLResponse)
+def login_page():
+    if not _password():
+        return RedirectResponse("/", status_code=303)
+    return LOGIN_PAGE.format(error="")
+
+
+@app.post("/login")
+def login(password: str = Form("")):
+    wanted = _password()
+    if not wanted or hmac.compare_digest(password.encode(), wanted.encode()):
+        response = RedirectResponse("/", status_code=303)
+        if wanted:
+            response.set_cookie(COOKIE, _token(wanted), max_age=SESSION_DAYS * 86400, httponly=True, samesite="lax")
+        return response
+    time.sleep(1)  # slows down password guessing
+    error = f'<div class="notice error">{html.escape("That password is wrong. Check DUB_PASSWORD in .env.")}</div>'
+    return HTMLResponse(LOGIN_PAGE.format(error=error), status_code=401)
+
+
+@app.get("/logout")
+def logout():
+    response = RedirectResponse("/login" if _password() else "/", status_code=303)
+    response.delete_cookie(COOKIE)
+    return response
 
 
 def _job(jid):
@@ -80,7 +125,7 @@ def index():
 
 @app.get("/api/config")
 def config():
-    return {"defaults": jobs.defaults(), "distances": jobs.DISTANCES,
+    return {"defaults": jobs.defaults(), "distances": jobs.DISTANCES, "login": bool(_password()),
             "missing_keys": [k for k in KEYS if not os.getenv(k)],
             "films": sorted(p.stem for p in FILMS.glob("*.json"))}
 

@@ -51,7 +51,7 @@ def build_parser():
     ap.add_argument("--voices", type=Path, help="existing voice map to start from (character -> voice)")
     ap.add_argument("--num-speakers", type=int, help="exact number of voices, if known (helps diarization)")
     ap.add_argument("--no-separate", action="store_true", help="skip Demucs; duck the whole original instead")
-    ap.add_argument("--model", default="gpt-5.4-mini", help="script model (OpenAI, or gemini-... to also send audio)")
+    ap.add_argument("--model", default="gpt-6-luna", help="script model (OpenAI, or gemini-... to also send audio)")
     ap.add_argument("--chunk", type=int, default=40, help="lines per script-model request (lower if it drops lines)")
     ap.add_argument("--polish-model", help="model for the native-editor polish pass (default: --model)")
     ap.add_argument("--tts-model", default="eleven_v4", help="ElevenLabs TTS model id")

@@ -86,6 +86,12 @@ label.field small, .hint { font-weight: 400; color: var(--muted); font-size: 13p
 #jobs [data-status="failed"] .s::before { background: var(--red); }
 #jobs .empty { color: var(--muted); padding: 0 8px; font-size: 14px; }
 
+.side .signout { margin-top: auto; padding: 0 6px; font-size: 14px; color: var(--muted); }
+
+.login { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
+.login form { width: min(380px, 100%); display: grid; gap: 14px; }
+.login button { justify-content: center; }
+
 main { padding: 28px 32px 120px; min-width: 0; outline: none; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; }
 .notice { border-radius: var(--radius); padding: 14px 16px; display: grid; gap: 6px; }
