@@ -1,0 +1,15 @@
+[
+ {"name": "Uyanga - Kind Khalkha Friend", "voice_id": "2cecqSnkajrth9sJSoEH", "gender": "female", "age": "young"},
+ {"name": "Bolor - Playful Ulaanbaatar Creator", "voice_id": "6OjaeAQxnuXC0oUZXZR2", "gender": "female", "age": "young"},
+ {"name": "Enkhtuya - Proud Ovorkhangai Ad", "voice_id": "49bcW9p7CyYxa3c0X0im", "gender": "female", "age": "young"},
+ {"name": "Oyuna - Warm Khalkha Narrator", "voice_id": "4pSHaU93d1XS027ZFhHB", "gender": "female", "age": "middle_aged"},
+ {"name": "Sarnai - Proud Mongolian Narrator", "voice_id": "WgH4JH8sD6a2SIrujiKn", "gender": "female", "age": "middle_aged"},
+ {"name": "Temuulen - Upbeat Ulaanbaatar Creator", "voice_id": "ztVKSTjXnQBPBYroYARn", "gender": "male", "age": "young"},
+ {"name": "Munkhbat - Warm Khentii Creator", "voice_id": "DLfKtGm2VGo06slN2VJE", "gender": "male", "age": "young"},
+ {"name": "Erdene - Blunt Ulaanbaatar Friend", "voice_id": "D9okmaITNQEQZq1w4Z1C", "gender": "male", "age": "young"},
+ {"name": "Batbayar - Firm Khalkha Ad", "voice_id": "Die79un8ishA33PLnH1j", "gender": "male", "age": "middle_aged"},
+ {"name": "Ganbold - Confident Khalkha Ad", "voice_id": "RbMF2tQ1nCK38TfvNGLk", "gender": "male", "age": "middle_aged"},
+ {"name": "Naran - Patient Ulaanbaatar Friend", "voice_id": "sQRZO8j8yYwJ3eCSUFy3", "gender": "male", "age": "middle_aged"},
+ {"name": "Bataar - Calm Khalkha Narrator", "voice_id": "sjPAZPn7M1KgdmdYfsuu", "gender": "male", "age": "old"},
+ {"name": "MN Dub - Little Girl", "voice_id": "Jrlv6rOVhop22p7iLXea", "gender": "female", "age": "child"}
+]

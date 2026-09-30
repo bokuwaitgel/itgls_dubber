@@ -1,0 +1,18 @@
+# secrets
+.env
+
+# generated
+__pycache__/
+*.pyc
+work/
+cache/
+data/
+
+# media
+*.mp3
+*.mp4
+*.wav
+*.mov
+*.mkv
+*.webm
+*.m4v

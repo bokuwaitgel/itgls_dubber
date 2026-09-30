@@ -1,0 +1,61 @@
+{
+ "title": "He Fought to Protect the Village - She Turned a Tiny Craft Stall Into Their Only Hope",
+ "genre": "rural family drama set in a cold northern frontier settlement",
+ "premise": "Isola (nickname Iso) has married Kalen, a centurion of the First Ranger Unit who guards the frontier settlement near the trade town Frostgate. She lifts the poor household with crafts (velvet flowers, hair ornaments), new foods and a secret knack for growing plants. The household: Kalen's mother Morgan (called Mom), his younger brother Ron and younger sister Ira. Ruby is Isola's pet red fox (animal, never speaks). Derek is Kalen's rival fighter; Derek's family (Serena) copies Isola's business.",
+ "narrator": "Isola",
+ "names": {
+  "Isola": "Изола",
+  "Iso": "Изо",
+  "Kalen": "Кэйлэн",
+  "Morgan": "Морган",
+  "Ron": "Рон",
+  "Ira": "Айра",
+  "Ruby": "Руби",
+  "Derek": "Дерек",
+  "Serena": "Серена",
+  "Skeg": "Скег",
+  "Bodil": "Бодил",
+  "Bjorn": "Бьорн",
+  "Frostgate": "Фростгейт"
+ },
+ "not_speakers": [
+  "Iso",
+  "Ruby",
+  "Frostgate"
+ ],
+ "aliases": {
+  "Isola": "Isola, Iso, Isila, Izila (female lead, Kalen's wife)",
+  "Kalen": "Kalen, Kaylan, Kylan, Caelan, Kaelen, Kalin, Karen (male lead, husband, Centurion)",
+  "Morgan": "Morgan, Mom (Kalen's mother, Isola's mother-in-law; female)",
+  "Ron": "Ron, Roan (Kalen's younger brother)",
+  "Ira": "Ira, Era (Kalen's younger sister, teenage girl)",
+  "Derek": "Derek (rival soldier, male)",
+  "Serena": "Serena (Derek's family, female)",
+  "Skeg": "Skeg (young man, head of a poor household, Ron's partner)",
+  "Bjorn": "Bjorn (fellow soldier, male)",
+  "Bodil": "Bodil (village woman)"
+ },
+ "glossary": {
+  "centurion": "зуутын дарга",
+  "First Ranger Unit": "Нэгдүгээр эргүүлийн анги",
+  "scouts": "тагнуулчид",
+  "tribal war band": "омгийн дайчдын бүлэг",
+  "garrison": "харуулын цэрэг",
+  "patrol": "эргүүл",
+  "settlement": "суурин",
+  "tree line": "ойн зах",
+  "camp": "хуаран",
+  "watch (guard duty)": "харуул",
+  "velvet flower": "хилэн цэцэг",
+  "hairband": "үсний тууз",
+  "hair ornament": "үсний гоёл",
+  "stall": "лангуу",
+  "market": "зах",
+  "cloak": "нөмрөг",
+  "coppers / coins": "зэс зоос",
+  "household / family (the Kalen household)": "Кэйлэнийх / айл",
+  "business": "наймаа / ажил"
+ },
+ "address": "Isola and Kalen are husband and wife: чи. Isola to Morgan: ээж, та. Kalen, Ron, Ira to Morgan: ээж, та. Ron and Ira to Kalen: ах. Ron and Ira to Isola: бэргэн эгч or Изо, та in the beginning, later warmer. Kalen and Isola to Ron/Ira: чи, дүү минь. Morgan to her children and Isola: чи, хүү минь / охин минь. Villagers to Isola: Изола, та; close village women to each other: чи. Soldiers to Kalen: дарга, та.",
+ "notes": "Speaker names to use: Isola, Kalen, Morgan, Ron, Ira, Derek, Serena, Skeg, Bjorn, Bodil. Ruby is a fox and never speaks. For unnamed minor roles say the gender in the name (e.g. \"Village Woman 1\", \"Soldier Man\", \"Merchant Man\"). Credits for voice generation are tight: keep each line compact and natural, about 80% of max_chars; drop filler and repetition, keep meaning."
+}

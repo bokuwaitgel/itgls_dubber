@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dub Studio</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%232F5DA8'/%3E%3Cpath d='M7 20h3M12 14v12M17 9v17M22 15v8M27 18v2' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Golos+Text:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css?v=1">
+</head>
+<body>
+  <div class="shell">
+    <aside class="side">
+      <a class="brand" href="#/">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M3 20h3M8 14v12M13 9v17M18 15v8M23 18v2M28 16v6"/></svg>
+        <span>Dub Studio<small>English to Mongolian</small></span>
+      </a>
+      <a class="button new" href="#/new">New dub</a>
+      <nav id="jobs" aria-label="Dubs"></nav>
+    </aside>
+    <main id="main" tabindex="-1"></main>
+  </div>
+
+  <dialog id="confirm">
+    <form method="dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-body"></p>
+      <div class="actions">
+        <button value="cancel" class="ghost">Cancel</button>
+        <button value="ok" id="confirm-ok">OK</button>
+      </div>
+    </form>
+  </dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+  <script src="/static/app.js?v=1"></script>
+</body>
+</html>
