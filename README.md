@@ -39,6 +39,10 @@ first dub. Edit it to change who can be cast.
 python -m studio            # http://127.0.0.1:8000
 ```
 
+Or as a desktop app in its own window: run `powershell -ExecutionPolicy Bypass -File make_shortcut.ps1` once to
+put a **Dub Studio** icon on the desktop, then double-click it (same as `pythonw -m studio.desktop`). Closing the
+window stops the server; a job that was running then shows as stopped, with Resume. Its log is `data/desktop.log`.
+
 1. **New dub**: drop a video and pick or write a film profile (see below). Try a clip of a few minutes first.
 2. Wait while the job runs. You can close the page, because the work runs on the server. Two jobs run at once
    (`DUB_WORKERS` in `.env`); their GPU steps (voice separation, speaker analysis) take turns so an 8 GB card
@@ -113,7 +117,7 @@ The studio has the same settings under Advanced settings.
 ```
 dub_video.py        pipeline entry point (stages, flags, resume)
 dubflow/            the stages: media, transcribe, analyze, script (translation), cast, dub (TTS + mix)
-studio/             web studio: app.py (API), jobs.py (job queue + runner), static/ (UI)
+studio/             web studio: app.py (API), jobs.py (job queue + runner), static/ (UI), desktop.py (app window)
 films/              film profiles
 voices/pool.json    voices that can be cast
 data/  work/  cache/   job files, CLI work dirs, LLM and TTS caches (not in git)

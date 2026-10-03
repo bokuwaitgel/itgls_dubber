@@ -32,6 +32,7 @@ ACTIVE = ("queued", "running", "stopping")
 OPTIONS = {"start": ("--start", float), "end": ("--end", float), "model": ("--model", str),
            "polish_model": ("--polish-model", str), "tts_model": ("--tts-model", str),
            "stability": ("--stability", float), "distance": ("--distance", str), "dub_gain": ("--dub-gain", float),
+           "bg_duck": ("--bg-duck", float),
            "num_speakers": ("--num-speakers", int), "chunk": ("--chunk", int), "no_separate": ("--no-separate", bool),
            "translate_workers": ("--translate-workers", int), "polish_workers": ("--polish-workers", int),
            "effort": ("--effort", str), "subs": ("--subs", str)}

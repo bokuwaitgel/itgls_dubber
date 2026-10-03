@@ -10,6 +10,7 @@ so --tts-cache ../dubbing/cache reuses lines already paid for).
 import hashlib
 import os
 import random
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -123,7 +124,8 @@ def render(script, voices, cache, seg_dir, stability=STABILITY, dub_gain=1.3, di
         rms = float(np.sqrt(np.mean(samples ** 2))) or 1.0
         samples = samples * min(LINE_RMS * dub_gain * room_gain / rms, 0.95 / (np.abs(samples).max() or 1.0))
 
-        name = f"{i + 1:04d}_{line['speaker'].replace(' ', '').lower()}_{int(line['start'])}s.wav"
+        speaker = re.sub(r"[^\w-]+", "", line["speaker"]).lower()  # "julian/doctorman" must not become a folder
+        name = f"{i + 1:04d}_{speaker}_{int(line['start'])}s.wav"
         sf.write(str(seg_dir / name), samples, MIX_RATE, subtype="PCM_16")
         end = line["start"] + len(samples) / MIX_RATE
         # Duck across the original line too, so no English tail sticks out past a shorter dub.
@@ -151,12 +153,14 @@ def _duck_curve(clips, duck, total):
     return np.array(xs + [total + 1]), np.array(ys + [1.0])
 
 
-def mix(clips, out_wav, duck, original=None, vocals=None, background=None):
-    """Stems given: background + ducked vocals + dub. Else: ducked original + dub."""
+def mix(clips, out_wav, duck, original=None, vocals=None, background=None, bg_duck=1.0):
+    """Stems given: background (lowered to `bg_duck` under dub lines, so the dub stays on top of music and effects)
+    + ducked vocals + dub. Else: ducked original + dub."""
     bed = background or original
     info = sf.info(str(bed))
     total = info.frames / MIX_RATE
     xs, ys = _duck_curve(clips, duck, total)
+    bxs, bys = _duck_curve(clips, bg_duck, total)
     step = int(MIX_CHUNK * MIX_RATE)
     readers = [sf.SoundFile(str(p)) for p in ([background, vocals] if background else [original])]
     try:
@@ -165,7 +169,11 @@ def mix(clips, out_wav, duck, original=None, vocals=None, background=None):
                 n = min(step, info.frames - a)
                 gain = np.interp((a + np.arange(n)) / MIX_RATE, xs, ys).astype(np.float32)[:, None]
                 parts = [r.read(n, dtype="float32", always_2d=True) for r in readers]
-                block = parts[0] + parts[1] * gain if background else parts[0] * gain
+                if background:
+                    bg_gain = np.interp((a + np.arange(n)) / MIX_RATE, bxs, bys).astype(np.float32)[:, None]
+                    block = parts[0] * bg_gain + parts[1] * gain
+                else:
+                    block = parts[0] * gain
                 dub = np.zeros(n, np.float32)
                 for start, samples, _, _ in clips:
                     s = int(start * MIX_RATE) - a

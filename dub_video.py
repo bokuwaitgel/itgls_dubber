@@ -74,6 +74,8 @@ def build_parser():
     ap.add_argument("--distance", choices=["close", "medium", "far"], default="medium",
                     help="mic distance feel of the dub voices")
     ap.add_argument("--duck", type=float, help="original voice level under dub lines (default 0 with stems, 0.05 without)")
+    ap.add_argument("--bg-duck", type=float, default=0.35,
+                    help="music/effects level under dub lines, with stems (1 = unchanged, 0.35 = about -9 dB)")
     ap.add_argument("--tts-cache", type=Path, default=ROOT / "cache" / "tts")
     ap.add_argument("--until", choices=STAGES, default="mux", help="stop after this stage")
     ap.add_argument("--redo", nargs="+", choices=STAGES, default=[], help="re-run these stages")
@@ -218,7 +220,8 @@ def main():
                   args.distance, args.tts_workers)
     duck = args.duck if args.duck is not None else (0.0 if stems else 0.05)
     timed(dub.mix, clips, f["dubbed"], duck, original=f["original"],
-          vocals=f["vocals"] if stems else None, background=f["background"] if stems else None)
+          vocals=f["vocals"] if stems else None, background=f["background"] if stems else None,
+          bg_duck=args.bg_duck)
     print(f"      {f['dubbed'].with_suffix('.mp3')}")
     from dubflow import subtitles  # timed to the real length of every dub line
     spoken = dub.spoken_lines(lines)

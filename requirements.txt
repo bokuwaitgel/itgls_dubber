@@ -8,6 +8,11 @@ numpy==1.26.4
 soundfile==0.14.0
 imageio-ffmpeg==0.6.0
 tqdm==4.70.1
+# pulled in by pyannote/speechbrain; pinned to older builds because Windows Smart App Control blocks the newest
+# (unsigned, not yet "known") DLLs of pandas 3.x, scikit-learn 1.9 and sentencepiece 0.2.2
+pandas==2.2.3
+scikit-learn==1.5.2
+sentencepiece==0.2.0
 
 elevenlabs==2.68.0
 openai==3.19.2
@@ -20,3 +25,4 @@ python-dotenv==1.2.3
 fastapi==0.142.1
 uvicorn[standard]==0.54.0
 python-multipart==0.0.32
+pywebview==6.2.1
