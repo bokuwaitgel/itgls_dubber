@@ -111,7 +111,8 @@ STYLE = """- Sound like real Mongolians talking to each other today, the way a g
 - Politeness: та to elders, parents-in-law, superiors and strangers; чи between spouses, siblings, friends
   and to children. Family address words as a Mongolian would say them (ээж, аав, ах, эгч, дүү, хүү минь).
 - Numbers and abbreviations as Mongolian words (2025 -> хоёр мянга хорин тав), no digits.
-- Period/fantasy setting: no modern slang or modern-world words."""
+- Follow the setting in the notes: period/fantasy = no modern slang or modern-world words; modern = everyday
+  modern speech is right."""
 
 POLISH = """You are the native Mongolian script editor of a TV dub ("{title}", {genre}). Each line has the English
 original, who says it, the gender/age heard on the voice, and a draft Mongolian dub line. Return every line

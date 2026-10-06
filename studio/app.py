@@ -161,6 +161,8 @@ def create_job(video: UploadFile = File(...), title: str = Form(""), film: str =
         raise HTTPException(400, f"Upload a video file ({', '.join(sorted(jobs.VIDEO_EXT))}).")
     title = title.strip() or film_data.get("title") or upload.stem
     film_data.pop("title", None)
+    from dubflow.profile import clean_film
+    film_data = clean_film(film_data)
     job = jobs.create(title, film_data, opts, upload.suffix.lower())
     with open(job["video"], "wb") as f:
         shutil.copyfileobj(video.file, f, 1 << 20)
@@ -221,7 +223,12 @@ def retranslate(jid: str):
 
 @app.get("/api/jobs/{jid}/film")
 def get_film(jid: str):
-    return load_json(jobs.paths(_job(jid))["film"])
+    """The profile as the translator sees it: the one worked out from the film, overridden by what was typed."""
+    from dubflow import profile
+    p = jobs.paths(_job(jid))
+    film = load_json(p["film"])
+    auto = p["work"] / "film_auto.json"
+    return profile.merge(load_json(auto), film) if auto.exists() else profile.clean_film(film)
 
 
 @app.put("/api/jobs/{jid}/film")

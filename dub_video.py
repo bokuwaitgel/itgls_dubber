@@ -55,6 +55,8 @@ def build_parser():
     ap.add_argument("--model", default="gpt-6-luna", help="script model (OpenAI, or gemini-... to also send audio)")
     ap.add_argument("--chunk", type=int, default=40, help="lines per script-model request (lower if it drops lines)")
     ap.add_argument("--polish-model", help="model for the native-editor polish pass (default: --model)")
+    ap.add_argument("--no-auto-profile", dest="auto_profile", action="store_false",
+                    help="don't build the film profile (characters, names, та/чи, terms) from the transcript first")
     ap.add_argument("--translate-workers", type=int, default=1,
                     help="film segments translated in parallel (faster; >1 slightly less consistent speaker names)")
     ap.add_argument("--polish-workers", type=int, default=6, help="polish requests in parallel")
@@ -84,6 +86,8 @@ def build_parser():
 
 
 def main():
+    for stream in (sys.stdout, sys.stderr):  # Mongolian text on a Windows console
+        stream.reconfigure(encoding="utf-8", errors="replace")
     args = build_parser().parse_args()
 
     if not args.video.exists():
@@ -100,7 +104,7 @@ def main():
         source="source.mp4", original="original.wav", vocals="vocals.wav", background="background.wav",
         transcript="transcript_en.json", diarization="diarization.json", lines="lines.json",
         profile="voices_profile.json", script_json="script.json", script="script_mn.txt", script_en="script_en.txt",
-        warnings="gender_warnings.txt", voices="voices.json", cast="cast.json", dubbed="dubbed.wav", subs="subtitles_mn.srt",
+        warnings="gender_warnings.txt", voices="voices.json", cast="cast.json", dubbed="dubbed.wav", subs="subtitles_mn.srt", film_auto="film_auto.json",
         final=f"{name}_mn.mp4").items()}
     print(f"work dir: {work}  (device: {device})")
 
@@ -170,9 +174,16 @@ def main():
 
     # script
     if todo("script", f["script"]):
-        from dubflow import script
+        from dubflow import profile, script
+        lines_en = load_json(f["lines"])
+        if args.auto_profile:  # who's who, names, та/чи, terms: read off the whole film before translating
+            auto = timed(profile.build, lines_en, film, args.model, args.effort)
+            save_json(f["film_auto"], auto)
+            film = profile.merge(auto, film)
+        else:
+            film = profile.clean_film(film)
         audio = voice_src if args.model.startswith("gemini") else None
-        lines = timed(script.write_script, load_json(f["lines"]), film, load_json(f["profile"]), args.model, audio,
+        lines = timed(script.write_script, lines_en, film, load_json(f["profile"]), args.model, audio,
                       chunk_size=args.chunk, polish_model=args.polish_model, draft_workers=args.translate_workers,
                       polish_workers=args.polish_workers, effort=args.effort)
         save_json(f["script_json"], lines)

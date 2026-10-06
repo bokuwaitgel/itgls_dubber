@@ -112,15 +112,7 @@ async function route() {
 }
 
 // ---- new dub
-const BLANK_FILM = {
-  genre: "drama",
-  premise: "Who the main characters are and what happens, in two or three sentences.",
-  narrator: "the main character",
-  names: { "Anna": "Анна" },
-  aliases: { "Anna": "Anna, Mom (female lead)" },
-  address: "Who says та and who says чи to whom.",
-  notes: "",
-};
+const BLANK_FILM = {};  // worked out from the film itself; anything typed here wins
 
 const SUBS = [["soft", "Switchable (viewers can turn them off)"], ["burn", "Always visible (burned in)"], ["none", "None"]];
 const subsOptions = cur => SUBS.map(([v, t]) => `<option value="${v}" ${v === cur ? "selected" : ""}>${t}</option>`).join("");
@@ -161,8 +153,9 @@ function showNew() {
       </label>
       <div class="field">
         <label class="field">Film profile
-          <small>Character names with their Mongolian spelling, who is who, and how people address each other.
-            The translator follows it, so a good profile gives a much better script.</small>
+          <small>Leave it empty: characters, their Mongolian names, who says та or чи to whom and the plot are
+            worked out from the film before translating. Anything you add here (for example
+            <code>{"names": {"Ethan": "Итан"}}</code>) wins.</small>
           <select id="filmpick"><option value="">Start from a blank profile</option>${films}</select>
         </label>
         <textarea class="film-json" id="filmjson" spellcheck="false" aria-label="Film profile JSON">${esc(JSON.stringify(BLANK_FILM, null, 1))}</textarea>
@@ -385,8 +378,8 @@ function clipPanel() {
 
 function filmPanel() {
   return `<details class="film" id="filmbox"><summary>Film profile</summary>
-    <p class="muted">Names, who is who and how characters address each other. The translator reads this. After changing it,
-      retranslate to rewrite the script.</p>
+    <p class="muted">What the translator knows about the film: worked out from the film itself, plus anything you
+      changed. Fix a name or a та/чи rule here, save, then retranslate.</p>
     <textarea class="film-json" id="filmedit" spellcheck="false" aria-label="Film profile JSON"></textarea>
     <div class="film-actions"><button id="savefilm">Save profile</button>
       <button class="ghost" id="retranslate">Retranslate the script</button></div></details>`;
