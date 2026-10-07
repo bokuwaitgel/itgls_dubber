@@ -97,6 +97,20 @@ The translator reads this JSON with every chunk of the script. A good profile is
 See `films/betrayed.json` for a complete example. After changing the profile of a job, use **Retranslate the
 script**. Your current script is kept as a backup file first.
 
+## Speakers and gender
+
+The analyze stage decides who says each line, so each character gets a voice of the right gender:
+
+- **Diarization**: pyannote 3.1. `speaker-diarization-community-1` was tested on two films and merged different
+  men into one voice more often, so 3.1 stays. "Number of speakers", when you know it, helps.
+- **Voice check**: each line gets a WeSpeaker embedding. A line that doesn't sound like its voice moves to the
+  voice it matches, or to a new one (`V21b`). The old voice is kept as `voice_was` in `lines.json`.
+- **Gender**: two models (audeering + Common Voice). Where they disagree, the line takes its voice's gender.
+- **Split**: a character with lines clearly heard as the other gender gets those lines as `Name (female?)` /
+  `Name (male?)`. They are cast with a matching voice and show up in Review: rename them to the right character.
+
+After changing analysis code, re-run with `--redo analyze script` (keep `diarization.json`).
+
 ## Command line
 
 The studio runs `dub_video.py`, which also works on its own:
