@@ -50,6 +50,7 @@ TAG_MAP = {"concerned": "worried", "anxious": "worried", "tense": "nervous", "fe
            "frustrated": "angry", "annoyed": "angry", "irritated": "angry", "desperate": "pleading",
            "pained": "hurt", "breathless": "panting"}
 FRAGMENT_SEC = 1.5  # max length of a piece join_fragments may hand back to the surrounding speaker
+SPLIT_SURE = 0.3  # lines.json without "gender_sure" (older runs): a line this far from 0.5 counts as sure
 
 SYSTEM = """You write the Mongolian dub script for an English-dubbed {genre} ("{title}").
 {premise}
@@ -61,9 +62,10 @@ Evidence on each line:
   the whole film; a voice actor may double a few minor roles. "voice_history" tells what each voice was called
   in earlier lines: keep that name unless the context clearly shows a different character.
 - heard: gender and age group measured from the voice ("uncertain" = no clear call), plus the emotion the audio
-  sounds like when it was clear. Gender is reliable: never give a line heard as female to a male character or
-  the other way round. The emotion model is trained on acted speech and over-reports "sad": trust the words
-  and context first.
+  sounds like when it was clear. Gender is checked by two models and against the whole voice, so it is strong
+  evidence: don't give a line heard as female to a male character or the other way round unless the words
+  make it plain (the line names or answers the speaker, or clearly continues their sentence). The emotion
+  model is trained on acted speech and over-reports "sad": trust the words and context first.
 
 speaker:
 - The character who says the line, in English. Reuse known character names. Narration is usually {narrator}.
@@ -343,6 +345,9 @@ def write_script(lines, film, voices, model, audio=None, chunk_size=CHUNK, polis
     finally:
         polisher.close()
     join_fragments(out)
+    moved = split_gender(out)
+    if moved:
+        print(f"      {moved} lines heard as the other gender than their character -> '<name> (female?)/(male?)'")
     print(f"      {stats['tokens']} tokens this run")
     return out
 
@@ -365,6 +370,24 @@ def join_fragments(lines):
         if (a["speaker"] == c["speaker"] != b["speaker"] and b["end"] - b["start"] < FRAGMENT_SEC
                 and a["en"].rstrip()[-1:] not in ".?!" and b["start"] - a["end"] < 0.5):
             b["speaker"] = a["speaker"]
+
+
+def split_gender(lines):
+    """Sure lines (both gender models agree) heard as the other gender than most of their character's speech go
+    to "<name> (female?)" / "<name> (male?)", so casting gives them a matching voice and the review shows them
+    to fix. Returns the count."""
+    sure = [l for l in lines if "p_female" in l and l.get("gender_sure", abs(l["p_female"] - 0.5) >= SPLIT_SURE)]
+    secs = defaultdict(lambda: [0.0, 0.0])  # speaker -> [female seconds, male seconds]
+    for l in sure:
+        secs[l["speaker"]][l["p_female"] < 0.5] += l["end"] - l["start"]
+    moved = 0
+    for l in sure:
+        f, m = secs[l["speaker"]]
+        main_female = f > m
+        if (l["p_female"] > 0.5) != main_female and min(f, m) < 0.5 * max(f, m):
+            l["speaker"] = f"{l['speaker']} ({'female' if l['p_female'] > 0.5 else 'male'}?)"
+            moved += 1
+    return moved
 
 
 class Polisher:

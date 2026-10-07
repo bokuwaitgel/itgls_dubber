@@ -165,6 +165,10 @@ def main():
         lines = analyze.build_lines(load_json(f["transcript"])["words"], turns)
         with gpu_lock(device):
             timed(analyze.add_features, lines, audio, device)
+            emb = timed(analyze.embed_lines, lines, audio, device)
+        moved = analyze.refine_voices(lines, emb)
+        print(f"      {moved} lines moved to the voice they sound like (voice_was in lines.json)")
+        analyze.smooth_gender(lines)
         profile = analyze.profile([l for l in lines if l["voice"] != "SFX"], "voice")
         save_json(f["lines"], lines)
         save_json(f["profile"], profile)

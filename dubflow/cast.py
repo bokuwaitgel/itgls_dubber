@@ -43,6 +43,8 @@ def load_pool():
 
 
 def _gender(name, info):
+    if name.endswith(("(female?)", "(male?)")):  # split off by script.split_gender
+        return "female" if name.endswith("(female?)") else "male"
     if "p_female" in info:
         return "female" if info["p_female"] >= 0.5 else "male"
     low = name.lower()
