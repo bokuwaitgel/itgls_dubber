@@ -9,10 +9,11 @@ soundfile==0.14.0
 imageio-ffmpeg==0.6.0
 tqdm==4.70.1
 # pulled in by pyannote/speechbrain; pinned to older builds because Windows Smart App Control blocks the newest
-# (unsigned, not yet "known") DLLs of pandas 3.x, scikit-learn 1.9 and sentencepiece 0.2.2
+# (unsigned, not yet "known") DLLs of pandas 3.x, scikit-learn 1.9, sentencepiece 0.2.2 and lameenc 1.8.4
 pandas==2.2.3
 scikit-learn==1.5.2
 sentencepiece==0.2.0
+lameenc==1.7.0
 
 elevenlabs==2.68.0
 openai==3.19.2

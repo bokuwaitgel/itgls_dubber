@@ -17,3 +17,6 @@ data/
 *.webm
 *.m4v
 *.ico
+
+# cloned voice samples (private recordings)
+voices/clone/

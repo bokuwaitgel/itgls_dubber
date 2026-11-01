@@ -26,9 +26,11 @@ Keys in `.env`:
 | key | used for |
 | --- | --- |
 | `ELEVENLABS_API_KEY` | transcription (Scribe) and the Mongolian voices |
-| `OPENAI_API_KEY` | translation |
+| `OPENAI_API_KEY` | only with an API translation model (`--model gpt-...`) |
 | `GEMINI_API_KEY` | only with a `gemini-*` translation model |
 | `HF_TOKEN` | pyannote speaker diarization (accept the terms at hf.co/pyannote/speaker-diarization-3.1) |
+| `BUNNY_LIBRARY_ID`, `BUNNY_STREAM_API_KEY` | optional: upload each finished film to Bunny Stream |
+| `BUNNY_CDN_HOSTNAME`, `BUNNY_TOKEN_AUTH_KEY` | optional: HLS link and a signed embed link in `bunny.json` |
 
 The voice pool (`voices/pool.json`) is built from the Mongolian cloned voices in your ElevenLabs account on the
 first dub. Edit it to change who can be cast.
@@ -125,6 +127,19 @@ Translation speed: polish requests run in parallel alongside the draft (`--polis
 `--translate-workers 3` also translates three parts of the film at once, about 3 times faster, but names can
 drift a little between parts. `--effort low` makes the model think less (faster, a bit rougher).
 The studio has the same settings under Advanced settings.
+
+Translation runs through the Codex CLI by default (`--model codex`, effort high): it uses your ChatGPT plan, so
+there is no per-token API bill, only the plan's usage limits (about 20k tokens of Codex overhead per request).
+Needs `npm install -g @openai/codex` and `codex login` once. `--model codex:<name>` picks a plan model;
+`--model gpt-...` goes back to paying per token through the API.
+
+After draft and polish, an editor pass reads the finished lines as scenes and fixes only wording, grammar and flow
+(`--no-edit` skips it). All three passes see `dubflow/style_mn.txt`: lines from human Mongolian dubs of this genre,
+as examples of the voice to match. Edit or replace them freely.
+
+With the `BUNNY_*` keys in `.env`, a whole film is uploaded to Bunny Stream after mux, with the Mongolian subtitles
+as a caption track; the video id and links are written to `bunny.json` in the work dir, and the same file is never
+uploaded twice. Excerpts (`--start`/`--end`) are uploaded only with `--bunny`; `--no-bunny` skips the upload.
 
 ## Layout
 

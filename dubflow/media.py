@@ -112,6 +112,36 @@ def text_band(frames, h):
     return top / h, (bottom + 1) / h
 
 
+SUB_FPS = 5  # frames per second scanned for the video's own subtitles
+SUB_BRIDGE = 0.4  # seconds: shorter gaps between subtitle frames are one subtitle (a change, a missed frame)
+SUB_PAD = 0.15  # seconds the cover bar comes early / stays late
+
+
+def text_times(video, band, h):
+    """[(start, end)] seconds when the video's own subtitles are on screen inside band (fractions of the height),
+    so the cover bar is only there while they are."""
+    width, height = video_size(video)
+    y0, bh = int(band[0] * h), max(2, int((band[1] - band[0]) * h))
+    proc = subprocess.Popen([FFMPEG, "-v", "error", "-i", str(video), "-an", "-vf",
+                             f"fps={SUB_FPS},scale={SAMPLE_W}:{h},format=gray,crop={SAMPLE_W}:{bh}:0:{y0}",
+                             "-f", "rawvideo", "-"], stdout=subprocess.PIPE)
+    on, size = [], SAMPLE_W * bh
+    while len(raw := proc.stdout.read(size)) == size:
+        rows = _text_pixels(np.frombuffer(raw, np.uint8).reshape(bh, SAMPLE_W).astype(np.int16)).sum(1) / SAMPLE_W
+        on.append((rows > 0.03).sum() >= 2)
+    proc.wait()
+    spans = []
+    for i, v in enumerate(on):
+        if not v:
+            continue
+        t = i / SUB_FPS
+        if spans and t - spans[-1][1] <= SUB_BRIDGE:
+            spans[-1][1] = t + 1 / SUB_FPS
+        else:
+            spans.append([t, t + 1 / SUB_FPS])
+    return [(max(0.0, a - SUB_PAD), b + SUB_PAD) for a, b in spans if b - a >= 0.3]
+
+
 def logo_box(frames, h):
     """(x0, y0, x1, y1) as fractions of the frame around a channel logo that is in the same place in nearly every
     frame, near the top or bottom edge; None if there is none."""
@@ -125,12 +155,22 @@ def logo_box(frames, h):
     return None
 
 
+def _bit_rate(video):
+    """The video stream's bits per second (the whole file's if the stream doesn't say), or None."""
+    info = subprocess.run([FFMPEG, "-hide_banner", "-i", str(video)], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace").stderr
+    m = re.search(r"Video:.*?(\d+) kb/s", info) or re.search(r"bitrate: (\d+) kb/s", info)
+    return int(m.group(1)) * 1000 if m else None
+
+
 def _even(v):
     return int(round(v)) // 2 * 2
 
 
 WATERMARK = {"auto": True, "x": 0.72, "y": 0.955, "size": 0.42, "opacity": 1.0, "box": True, "blur": True,
              "cover": True}
+CORNER_MARK = {"corner": "bottom-right", "size": 0.22, "margin": 0.035, "opacity": 0.9, "auto": False, "box": False,
+               "blur": False, "cover": False}  # small logo in a corner; size and margin as fractions of the short side
 
 
 def _watermark_graph(cur, width, height, logo_size, found, style, logo_input):
@@ -138,6 +178,13 @@ def _watermark_graph(cur, width, height, logo_size, found, style, logo_input):
     fractions of the frame), `size` = logo width as a fraction of the frame width. Behind it the video can be
     blurred (`blur`, frosted glass) and/or darkened (`box`)."""
     st = {**WATERMARK, **(style or {})}
+    if st.get("corner"):  # "bottom-left" etc.: as big and as far from the edges on vertical and wide video alike
+        short = min(width, height)
+        st["size"] *= short / width
+        half_w, half_h = width * st["size"] / 2, width * st["size"] * logo_size[1] / logo_size[0] / 2
+        m = st.get("margin", 0.035) * short
+        st["x"] = (m + half_w) / width if "left" in st["corner"] else 1 - (m + half_w) / width
+        st["y"] = (m + half_h) / height if "top" in st["corner"] else 1 - (m + half_h) / height
     lw = _even(width * st["size"])
     lh = _even(lw * logo_size[1] / logo_size[0])
     pad = _even(lh * 0.25)
@@ -203,12 +250,17 @@ def mux(video, audio, out, subs=None, mode="soft", cover=True, logo=None, logo_s
                 band = (max(0.0, band[0] - 0.012), min(1.0, band[1] + 0.012))
                 print(f"      covering the video's own subtitles at {band[0]:.0%}-{band[1]:.0%} of the height", flush=True)
             ass = subs.with_suffix(".ass")
+            found = band
             band = write_ass(read_srt(subs), ass, width, height, band)
             if band:
+                spans = text_times(video, found, h)
+                print(f"      they are on screen {sum(b - a for a, b in spans) / 60:.1f} min in {len(spans)} pieces: "
+                      f"the cover bar shows only then", flush=True)
+                enable = "+".join(f"between(t,{a:.2f},{b:.2f})" for a, b in spans) or "0"
                 y, bh = _even(band[0] * height), max(48, _even((band[1] - band[0]) * height))
                 graph.append(f"[{cur}]split[sa][sb];[sb]crop=iw:{bh}:0:{y},boxblur=luma_radius=20:luma_power=2:"
                              f"chroma_radius=10,drawbox=x=0:y=0:w=iw:h=ih:color=black@0.45:t=fill[bar];"
-                             f"[sa][bar]overlay=0:{y}[subbed]")
+                             f"[sa][bar]overlay=0:{y}:enable='{enable}'[subbed]")
                 cur = "subbed"
         if logo:
             st = {**WATERMARK, **(logo_style or {})}
@@ -222,9 +274,14 @@ def mux(video, audio, out, subs=None, mode="soft", cover=True, logo=None, logo_s
             # The ass filter takes a bare file name: run from its folder so Windows drive colons need no escaping.
             graph.append(f"[{cur}]ass={ass.name}[subs]")
             cur, cwd = "subs", ass.parent
-        args += ["-filter_complex", ";".join(graph)]
+        # From a file: one enable range per subtitle makes a whole film's graph longer than a Windows command line.
+        graph_file = out.with_suffix(".filters.txt")
+        graph_file.write_text(";".join(graph), encoding="utf-8")
+        args += ["-/filter_complex", str(graph_file)]
         maps = ["-map", f"[{cur}]"] + maps
         codec = h264_encoder()
+        if rate := _bit_rate(video):  # more than the source holds only makes the file (and uploads) bigger
+            codec += ["-maxrate", str(int(rate * 1.25)), "-bufsize", str(int(rate * 2.5))]
     else:
         maps = ["-map", "0:v:0"] + maps
         codec = ["-c:v", "copy"]

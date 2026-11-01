@@ -19,7 +19,9 @@ from pydantic import BaseModel
 from .analyze import age_group, gender_word
 from .common import FFMPEG, ROOT, TAG
 
-MODEL = "gpt-6-luna"
+MODEL = "codex"  # ChatGPT plan through the Codex CLI (see _codex); "gpt-6-luna" etc. to pay per token via the API
+FALLBACK = "gpt-6-luna"  # API model for the rest of a run once the Codex plan limit is hit (needs OPENAI_API_KEY;
+#                          "" to stop instead and wait for the limit to reset)
 CHUNK = 40  # lines per request
 DRAFT_WORKERS = 1  # film segments translated side by side: N is ~N times faster, but each segment after the
 #                    first starts without the earlier names-per-voice history (slightly less consistent speakers)
@@ -66,6 +68,10 @@ Evidence on each line:
   evidence: don't give a line heard as female to a male character or the other way round unless the words
   make it plain (the line names or answers the speaker, or clearly continues their sentence). The emotion
   model is trained on acted speech and over-reports "sad": trust the words and context first.
+- on_screen: the film's own English subtitle shown while the line is said, read off the picture. It is the true
+  wording: where "en" (speech recognition) mishears a name or a shouted line, translate on_screen instead. One
+  subtitle can cover several lines and one line several subtitles: give each line only its own part. A line with
+  an empty "en" was missed by speech recognition: translate its on_screen text and pick its speaker from context.
 
 speaker:
 - The character who says the line, in English. Reuse known character names. Narration is usually {narrator}.
@@ -126,7 +132,8 @@ person; a line heard as female is not said by a male character and the other way
 names that already appear in the lines or previous_lines.
 
 Fix the draft so a Mongolian viewer hears natural, correct, living speech:
-- Meaning: must match the English (intent, facts, who is addressed). Fix mistranslations and lost meaning.
+- Meaning: must match the English (intent, facts, who is addressed). Fix mistranslations and lost meaning. Where a
+  line has "on_screen" (the film's own subtitle), that is the true English wording, not "en".
 - Language: correct grammar, case endings and vowel harmony; replace calques, bookish words and needless
   Russian/English loans with what a Mongolian would really say.
 {style}
@@ -138,6 +145,21 @@ Fix the draft so a Mongolian viewer hears natural, correct, living speech:
   one only if it is wrong for the line; a background sound is not a tag. Tags stay in English and must be from:
   {tags}.
 If a draft line is already good, return it unchanged."""
+
+EDIT = """You are the final Mongolian dialogue editor (найруулагч) of a TV dub ("{title}", {genre}). The lines are
+already translated and checked for meaning. Read them in order as one scene, the way a viewer hears them, and fix
+only what a native Mongolian listener would stumble on:
+- words that don't exist, are misspelled, or are the wrong word for the meaning ("чам шиг дараатай" for "dead
+  weight like you" -> "чам шиг ачаа")
+- wrong collocations, case endings, vowel harmony, verb forms, possessives
+- phrasing that sounds translated, written or stiff; a line that doesn't follow naturally from the line before
+- a sentence spread over several lines must read as one sentence when played in order
+Keep the meaning, every [tag] (in English, from: {tags}), names exactly as written, and the length (stay near
+max_chars, never much longer). Return every line (same id) with its text; a line that is already good comes back
+unchanged."""
+
+STYLE_FILE = ROOT / "dubflow" / "style_mn.txt"  # lines from human Mongolian dubs of this genre (one per line)
+EDIT_CONTEXT = 10  # final lines before a chunk shown to the editor
 
 AUDIO_NOTE = """
 The audio of these lines is attached; each line's "at" is its start in seconds from the clip start.
@@ -162,6 +184,24 @@ class Fixed(BaseModel):
 
 class FixedChunk(BaseModel):
     lines: list[Fixed]
+
+
+class Edited(BaseModel):
+    id: int
+    text: str
+
+
+class EditedChunk(BaseModel):
+    lines: list[Edited]
+
+
+def style_examples():
+    """STYLE_FILE as a prompt block: how real Mongolian dubbers of this genre talk (voice, not content)."""
+    if not STYLE_FILE.exists():
+        return ""
+    rows = [l.strip() for l in STYLE_FILE.read_text(encoding="utf-8").splitlines() if l.strip() and not l.startswith("#")]
+    return ("\n\nLines from human Mongolian dubs of this kind of drama. Match their voice - word choice, particles, "
+            "rhythm, how people address each other - never their content:\n" + "\n".join(rows)) if rows else ""
 
 
 def read_guide(path):
@@ -193,6 +233,8 @@ def audio_clip(audio, start, end):
 
 
 def _client(model):
+    if model.startswith("codex"):
+        return None
     if model.startswith("gemini"):
         from google import genai
         return genai.Client()
@@ -200,7 +242,99 @@ def _client(model):
     return OpenAI()
 
 
+def _strict(node, defs=None):
+    """Pydantic JSON schema -> the strict form structured outputs need: $refs inlined, every property required,
+    no extra properties."""
+    defs = node.get("$defs", {}) if defs is None else defs
+    if "$ref" in node:
+        return _strict(defs[node["$ref"].rsplit("/", 1)[-1]], defs)
+    out = {k: v for k, v in node.items() if k not in ("$defs", "title", "default")}
+    if out.get("type") == "object":
+        out["properties"] = {k: _strict(v, defs) for k, v in out.get("properties", {}).items()}
+        out["required"] = list(out["properties"])
+        out["additionalProperties"] = False
+    if "items" in out:
+        out["items"] = _strict(out["items"], defs)
+    return out
+
+
+def _codex_default_model():
+    """The model set in ~/.codex/config.toml (still wanted when the rest of that config is skipped), or None."""
+    import os
+    import tomllib
+
+    path = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "config.toml"
+    try:
+        return tomllib.loads(path.read_text(encoding="utf-8")).get("model")
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+
+
+def _codex(model, system, user, schema, effort, images=()):
+    """"codex" or "codex:<model>": the model of your ChatGPT plan through the Codex CLI, so no API billing (plan
+    usage limits apply). It runs read-only in an empty temp dir and must answer in the schema's JSON. The user's
+    config.toml is skipped: its plugins and MCP servers would add their tool definitions (~20k tokens) to every call."""
+    import shutil
+    import tempfile
+
+    exe = shutil.which("codex")
+    if not exe:
+        raise SystemExit("codex CLI not found: npm install -g @openai/codex, then codex login")
+    with tempfile.TemporaryDirectory() as tmp:
+        schema_path, out_path = Path(tmp) / "schema.json", Path(tmp) / "out.json"
+        schema_path.write_text(json.dumps(_strict(schema.model_json_schema())), encoding="utf-8")
+        cmd = [exe, "exec", "--ephemeral", "--ignore-user-config", "--skip-git-repo-check", "-s", "read-only", "-C", tmp,
+               "--color", "never",
+               "--json", "--output-schema", str(schema_path), "-o", str(out_path),
+               "-c", f'model_reasoning_effort="{effort}"']
+        if name := model.split(":", 1)[1] if ":" in model else _codex_default_model():
+            cmd += ["-m", name]
+        cmd += [f"--image={p}" for p in images]
+        prompt = ("You are used here as a text engine, not a coding agent: don't run commands or read files, just "
+                  f"answer with the JSON.\n\n{system}\n\n---\n\n{user}")
+        r = subprocess.run(cmd + ["-"], input=prompt, capture_output=True, text=True, encoding="utf-8")
+        tokens, error = 0, ""
+        for row in r.stdout.splitlines():
+            try:
+                event = json.loads(row)
+            except json.JSONDecodeError:
+                continue
+            usage = event.get("usage") or {}
+            tokens += usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+            if event.get("type") in ("error", "turn.failed"):
+                error = event.get("message") or (event.get("error") or {}).get("message", "")
+        if "usage limit" in error:  # nothing more will work until the plan resets; cached calls are kept for a rerun
+            raise CodexLimit(f"codex: {error}")
+        if not out_path.exists() or not out_path.read_text(encoding="utf-8").strip():
+            print(f"      codex gave no answer (exit {r.returncode}): {(error or r.stderr.strip())[-300:]}", flush=True)
+            return None, max(tokens, 1)
+        try:
+            return schema.model_validate_json(out_path.read_text(encoding="utf-8")), max(tokens, 1)
+        except ValueError as e:
+            print(f"      codex answer didn't fit the schema: {str(e)[:200]}", flush=True)
+            return None, max(tokens, 1)
+
+
+class CodexLimit(SystemExit):
+    """The ChatGPT plan's usage limit: stops the run unless _ask can fall back to the API."""
+
+
+_fallback = {}  # set once the Codex limit is hit: {"client": OpenAI client}; later calls go straight to FALLBACK
+
+
 def _ask(client, model, system, user, clip, schema, effort=EFFORT):
+    if model.startswith("codex"):
+        if not _fallback:
+            try:
+                return _codex(model, system, user, schema, effort)
+            except CodexLimit as e:
+                import os
+                if not (FALLBACK and os.environ.get("OPENAI_API_KEY")):
+                    raise
+                if not _fallback:
+                    print(f"      {e}\n      -> the rest goes through the API ({FALLBACK})", flush=True)
+                    _fallback["client"] = _client(FALLBACK)
+        client, model = _fallback["client"], FALLBACK
     if model.startswith("gemini"):
         from google.genai import types
         parts = ([types.Part.from_bytes(data=clip, mime_type="audio/mp3")] if clip else []) + [user]
@@ -263,11 +397,12 @@ def max_chars(line):
 
 
 def write_script(lines, film, voices, model, audio=None, chunk_size=CHUNK, polish_model=None,
-                 draft_workers=DRAFT_WORKERS, polish_workers=POLISH_WORKERS, effort=EFFORT):
-    """Returns lines with "speaker", "draft" (first pass) and "mn" (after the polish pass) added.
+                 draft_workers=DRAFT_WORKERS, polish_workers=POLISH_WORKERS, effort=EFFORT, edit=True):
+    """Returns lines with "speaker", "draft" (first pass) and "mn" (after the polish and edit passes) added.
 
     Draft chunks run in order within each segment (each chunk sees the previous lines and what each voice was
-    called so far); polish chunks run in parallel alongside, each as soon as the drafts it looks at exist."""
+    called so far); polish chunks run in parallel alongside, each as soon as the drafts it looks at exist; the
+    editor then reads the finished lines as scenes and fixes wording only."""
     guide = read_guide(ROOT / film["guide"] if film.get("guide") else None)
     system = SYSTEM.format(title=film.get("title", "untitled"), genre=film.get("genre", "drama"),
                            premise=film.get("premise", ""), narrator=film.get("narrator", "the main character"),
@@ -276,6 +411,7 @@ def write_script(lines, film, voices, model, audio=None, chunk_size=CHUNK, polis
     system += f"\n\nCaption spellings of characters: {json.dumps(film['aliases'], ensure_ascii=False)}" \
         if film.get("aliases") else ""
     system += f"\n\nCharacter and story guide:\n{guide}" if guide else ""
+    system += style_examples()
     client = _client(model)
     if model.startswith("gemini"):
         system += AUDIO_NOTE
@@ -305,6 +441,7 @@ def write_script(lines, film, voices, model, audio=None, chunk_size=CHUNK, polis
                                     "mn": d["draft"]} for d in context[-CONTEXT:]],
                 "lines": [{"id": i, "voice": l["voice"], "heard": heard(l), "seconds": round(l["end"] - l["start"], 1),
                            "max_chars": max_chars(l), "en": l["en"]}
+                          | ({"on_screen": l["on_screen"]} if l.get("on_screen") else {})
                           | ({"at": round(l["start"] - clip_start, 1)} if audio else {})
                           for i, l in enumerate(chunk)],
                 "next_lines": [l["en"] for l in lines[n + size:n + size + LOOKAHEAD]],
@@ -340,6 +477,8 @@ def write_script(lines, film, voices, model, audio=None, chunk_size=CHUNK, polis
                 stats["tokens"] += used
         polisher.schedule()
         polisher.wait()
+        if edit:
+            stats["tokens"] += edit_pass(out, film, polish_model or model, chunk_size, effort, polish_workers)
     except RuntimeError as e:
         sys.exit(str(e))
     finally:
@@ -399,7 +538,7 @@ class Polisher:
     def __init__(self, lines, film, model, chunk_size, effort, stats, lock, workers=POLISH_WORKERS):
         self.lines, self.model, self.effort, self.stats, self.lock = lines, model, effort, stats, lock
         self.system = POLISH.format(title=film.get("title", "untitled"), genre=film.get("genre", "drama"),
-                                    style=STYLE, tags=TAGS + ", " + SOUNDS) + _film_notes(film)
+                                    style=STYLE, tags=TAGS + ", " + SOUNDS) + _film_notes(film) + style_examples()
         self.client = _client(model)
         self.pending = _chunks(len(lines), chunk_size)
         self.pool = ThreadPoolExecutor(max(1, workers))
@@ -428,7 +567,8 @@ class Polisher:
             "previous_lines": [{"speaker": d["draft_speaker"], "draft": d["draft"]}
                                for d in lines[max(0, n - CONTEXT):n]],
             "lines": [{"id": i, "speaker": l["draft_speaker"], "heard": heard(l), "max_chars": max_chars(l),
-                       "en": l["en"], "draft": l["draft"]} for i, l in enumerate(chunk)],
+                       "en": l["en"], "draft": l["draft"]} | ({"on_screen": l["on_screen"]} if l.get("on_screen") else {})
+                      for i, l in enumerate(chunk)],
             "next_lines": [{"speaker": l["draft_speaker"], "en": l["en"], "draft": l["draft"]}
                            for l in lines[n + size:n + size + LOOKAHEAD]],
         }
@@ -444,6 +584,42 @@ class Polisher:
             print(f"      polish [{self.stats['polished']}/{len(lines)}] "
                   f"{'cached' if not used else f'{used} tokens'}", flush=True)
         return True, used
+
+
+def edit_pass(lines, film, model, chunk_size, effort, workers=POLISH_WORKERS):
+    """Native editor over the polished lines (see EDIT): wording, grammar and flow only; speakers, meaning and tags
+    stay. Chunks run in parallel; each sees the final lines before it and after it as context."""
+    system = EDIT.format(title=film.get("title", "untitled"), genre=film.get("genre", "drama"),
+                         tags=TAGS + ", " + SOUNDS) + _film_notes(film) + style_examples()
+    client, lock, done = _client(model), threading.Lock(), [0]
+    ranges = _chunks(len(lines), chunk_size)
+    context = [{"speaker": l["speaker"], "mn": l["mn"]} for l in lines]  # fixed before editing: chunks don't wait
+
+    def one(n, size):
+        chunk = lines[n:n + size]
+        payload = {
+            "previous_lines": context[max(0, n - EDIT_CONTEXT):n],
+            "lines": [{"id": i, "speaker": l["speaker"], "en": l["en"], "max_chars": max_chars(l), "mn": l["mn"]}
+                      | ({"on_screen": l["on_screen"]} if l.get("on_screen") else {}) for i, l in enumerate(chunk)],
+            "next_lines": context[n + size:n + size + LOOKAHEAD],
+        }
+        result, used = _cached(client, model, system, json.dumps(payload, ensure_ascii=False, indent=1),
+                               EditedChunk, len(chunk), effort=effort)
+        if result is None:
+            return False, used
+        changed = 0
+        for r in result:
+            text = clean_tags(r.text)
+            changed += text != chunk[r.id]["mn"]
+            chunk[r.id]["mn"] = text
+        with lock:
+            done[0] += size
+            print(f"      edit   [{done[0]}/{len(lines)}] {changed} changed, "
+                  f"{'cached' if not used else f'{used} tokens'}", flush=True)
+        return True, used
+
+    with ThreadPoolExecutor(max(1, min(workers, len(ranges)))) as pool:
+        return sum(pool.map(lambda r: _solve(*r, one), ranges))
 
 
 def gender_warnings(lines, cast):

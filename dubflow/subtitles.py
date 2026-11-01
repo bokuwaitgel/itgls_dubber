@@ -1,10 +1,13 @@
 """Mongolian subtitles from the dub script: SRT for a switchable track, ASS for burning into the picture,
 WebVTT for the studio player. Tags ([warm], [laughs]) never show; sound-only lines get no subtitle."""
+import re
 from pathlib import Path
 
 from .common import HEADER_SRT, TAG, stamp, to_seconds
 
 MIN_SEC = 1.0  # shortest time a subtitle stays up
+MAX_CUE = 48  # characters on screen at once (about two lines on a vertical video); longer lines are split
+SPLITS = (r"(?<=[.!?…])\s+", r"(?<=[,;:])\s+", r"\s+")  # where to cut a long line: sentence ends, then commas, words
 GAP = 0.05  # seconds between one subtitle ending and the next starting
 READ_CPS = 13  # characters per second, to guess how long a line is said before it has been dubbed
 FONT = "Arial"  # ships with Windows and has Cyrillic; any installed font with Cyrillic works
@@ -26,6 +29,32 @@ def cues(lines, durations=None):
         out.append([line["start"], line["start"] + max(said, MIN_SEC), text])
     for a, b in zip(out, out[1:]):
         a[1] = max(a[0] + 0.2, min(a[1], b[0] - GAP))
+    return [piece for cue in out for piece in _split(*cue)]
+
+
+def _pieces(text, limit=MAX_CUE, splits=SPLITS):
+    """text in parts of at most `limit` characters, cut at the strongest break that works."""
+    if len(text) <= limit or not splits:
+        return [text]
+    out, cur = [], ""
+    for part in (p for p in re.split(splits[0], text) if p):
+        if cur and len(cur) + 1 + len(part) > limit:
+            out.append(cur)
+            cur = part
+        else:
+            cur = f"{cur} {part}" if cur else part
+    out.append(cur)
+    return [q for p in out for q in _pieces(p, limit, splits[1:])]
+
+
+def _split(start, end, text):
+    """A long cue as consecutive shorter ones, each on screen for its share of the time by length."""
+    parts = _pieces(text)
+    total, t, out = sum(len(p) for p in parts), start, []
+    for p in parts:
+        nxt = t + (end - start) * len(p) / total
+        out.append([t, nxt - (GAP if p is not parts[-1] else 0), p])
+        t = nxt
     return out
 
 

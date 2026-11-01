@@ -32,6 +32,8 @@ from pathlib import Path
 
 from dubflow.common import ANALYSIS_RATE, MIX_RATE, ROOT, decode, gpu_lock, load_json, read_script, save_json, stamp, write_script
 
+DEFAULT_LOGO = ROOT / "watermark-nobackground.png"
+
 STAGES = ["extract", "separate", "transcribe", "analyze", "script", "cast", "dub", "mux"]
 
 
@@ -52,7 +54,8 @@ def build_parser():
     ap.add_argument("--voices", type=Path, help="existing voice map to start from (character -> voice)")
     ap.add_argument("--num-speakers", type=int, help="exact number of voices, if known (helps diarization)")
     ap.add_argument("--no-separate", action="store_true", help="skip Demucs; duck the whole original instead")
-    ap.add_argument("--model", default="gpt-6-luna", help="script model (OpenAI, or gemini-... to also send audio)")
+    ap.add_argument("--model", default="codex", help="script model (OpenAI, gemini-... to also send audio, or codex[:model] to use your "
+                         "ChatGPT plan through the Codex CLI instead of the API)")
     ap.add_argument("--chunk", type=int, default=40, help="lines per script-model request (lower if it drops lines)")
     ap.add_argument("--polish-model", help="model for the native-editor polish pass (default: --model)")
     ap.add_argument("--no-auto-profile", dest="auto_profile", action="store_false",
@@ -60,8 +63,13 @@ def build_parser():
     ap.add_argument("--translate-workers", type=int, default=1,
                     help="film segments translated in parallel (faster; >1 slightly less consistent speaker names)")
     ap.add_argument("--polish-workers", type=int, default=6, help="polish requests in parallel")
-    ap.add_argument("--effort", choices=["low", "medium", "high"], default="medium",
-                    help="OpenAI reasoning effort for translation and polish (low = faster)")
+    ap.add_argument("--no-onscreen", dest="onscreen", action="store_false",
+                    help="don't read the video's own burned-in English subtitles (OCR through Codex) to correct the "
+                         "transcript")
+    ap.add_argument("--no-edit", dest="edit", action="store_false",
+                    help="skip the final native-editor pass over the translation (wording, grammar, flow)")
+    ap.add_argument("--effort", choices=["low", "medium", "high"], default="high",
+                    help="reasoning effort for translation and polish (low = faster; high costs no money with codex)")
     ap.add_argument("--tts-model", default="eleven_v4", help="ElevenLabs TTS model id")
     ap.add_argument("--tts-workers", type=int, default=4, help="parallel TTS requests (raise if your plan allows)")
     ap.add_argument("--stability", type=float, default=0.5)
@@ -69,10 +77,14 @@ def build_parser():
     ap.add_argument("--subs", choices=["soft", "burn", "none"], default="soft",
                     help="Mongolian subtitles in the final video: soft = a track viewers can switch off, "
                          "burn = drawn into the picture (always visible, re-encodes the video), none")
-    ap.add_argument("--watermark", type=Path, help="logo image (PNG with transparency) to put on the final video")
-    ap.add_argument("--watermark-style", default="{}",
-                    help='JSON placement, e.g. {"auto": false, "x": 0.8, "y": 0.06, "size": 0.3, "opacity": 0.8, '
-                         '"box": true, "cover": true}; default: over the video\'s own logo (see dubflow/media.py)')
+    ap.add_argument("--watermark", type=Path, default=DEFAULT_LOGO if DEFAULT_LOGO.exists() else None,
+                    help="logo image (PNG with transparency) to put on the final video; default: "
+                         f"{DEFAULT_LOGO.name}, small in the bottom-right corner")
+    ap.add_argument("--no-watermark", dest="watermark", action="store_const", const=None, help="no logo")
+    ap.add_argument("--watermark-style", default=None,
+                    help='JSON placement, e.g. {"corner": "top-right"} or {"auto": false, "x": 0.8, "y": 0.06, '
+                         '"size": 0.3, "opacity": 0.8, "box": true, "cover": true} (see dubflow/media.py); '
+                         "default: small in the bottom-right corner")
     ap.add_argument("--distance", choices=["close", "medium", "far"], default="medium",
                     help="mic distance feel of the dub voices")
     ap.add_argument("--duck", type=float, help="original voice level under dub lines (default 0 with stems, 0.05 without)")
@@ -80,6 +92,9 @@ def build_parser():
                     help="music/effects level under dub lines, with stems (1 = unchanged, 0.35 = about -9 dB)")
     ap.add_argument("--tts-cache", type=Path, default=ROOT / "cache" / "tts")
     ap.add_argument("--until", choices=STAGES, default="mux", help="stop after this stage")
+    ap.add_argument("--bunny", action=argparse.BooleanOptionalAction, default=None,
+                    help="upload the finished video to Bunny Stream (default: yes for a whole film when the BUNNY_* "
+                         "keys are in .env, no for a --start/--end excerpt)")
     ap.add_argument("--redo", nargs="+", choices=STAGES, default=[], help="re-run these stages")
     ap.add_argument("--yes", action="store_true", help="don't ask before spending TTS credits")
     return ap
@@ -180,6 +195,9 @@ def main():
     if todo("script", f["script"]):
         from dubflow import profile, script
         lines_en = load_json(f["lines"])
+        if args.onscreen:  # the video's own English subtitles: the true wording where speech recognition slips
+            from dubflow import onscreen
+            lines_en = onscreen.attach(lines_en, timed(onscreen.read_subtitles, video, work / "onscreen.json"))
         if args.auto_profile:  # who's who, names, та/чи, terms: read off the whole film before translating
             auto = timed(profile.build, lines_en, film, args.model, args.effort)
             save_json(f["film_auto"], auto)
@@ -189,7 +207,7 @@ def main():
         audio = voice_src if args.model.startswith("gemini") else None
         lines = timed(script.write_script, lines_en, film, load_json(f["profile"]), args.model, audio,
                       chunk_size=args.chunk, polish_model=args.polish_model, draft_workers=args.translate_workers,
-                      polish_workers=args.polish_workers, effort=args.effort)
+                      polish_workers=args.polish_workers, effort=args.effort, edit=args.edit)
         save_json(f["script_json"], lines)
         write_script(f["script"], lines, "mn")
         write_script(f["script_en"], lines, "en")
@@ -249,8 +267,19 @@ def main():
     from dubflow import media
     subs = f["subs"] if f["subs"].exists() else None
     timed(media.mux, video, f["dubbed"], f["final"], subs, args.subs, logo=args.watermark,
-          logo_style=json.loads(args.watermark_style))
+          logo_style=json.loads(args.watermark_style) if args.watermark_style else media.CORNER_MARK)
     print(f"      done: {f['final']}")
+
+    from dubflow import bunny
+    if args.bunny is False or (args.bunny is None and (excerpt or not bunny.configured())):
+        return
+    if not bunny.configured():
+        sys.exit("--bunny needs BUNNY_LIBRARY_ID and BUNNY_STREAM_API_KEY in .env")
+    print("\n== bunny")
+    title = film.get("title") or args.video.stem
+    if excerpt:
+        title += f" [{stamp(args.start or 0)[:8]}-{stamp(args.end)[:8] if args.end is not None else 'end'}]"
+    timed(bunny.upload, f["final"], title, work / "bunny.json", subs)
 
 
 if __name__ == "__main__":
