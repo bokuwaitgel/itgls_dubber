@@ -53,6 +53,8 @@ def build_parser():
                     help="existing speaker turns (analyze_speakers.py *_speakers.json or diarization.json)")
     ap.add_argument("--voices", type=Path, help="existing voice map to start from (character -> voice)")
     ap.add_argument("--num-speakers", type=int, help="exact number of voices, if known (helps diarization)")
+    ap.add_argument("--audio-track", type=int, help="audio stream to dub from, 0 = first (videos with several, e.g. "
+                    "the Chinese original next to an English dub; default: ffmpeg's pick)")
     ap.add_argument("--no-separate", action="store_true", help="skip Demucs; duck the whole original instead")
     ap.add_argument("--model", default="codex", help="script model (OpenAI, gemini-... to also send audio, or codex[:model] to use your "
                          "ChatGPT plan through the Codex CLI instead of the API)")
@@ -145,7 +147,7 @@ def main():
         if excerpt:
             end = args.end if args.end is not None else 10 ** 6
             timed(media.cut, args.video, f["source"], args.start or 0, end)
-        timed(media.extract, video, f["original"])
+        timed(media.extract, video, f["original"], args.audio_track)
     voice_src = f["vocals"] if stems else f["original"]
 
     # separate

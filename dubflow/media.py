@@ -24,8 +24,10 @@ def _part(path):
     return path.with_name(path.stem + ".part" + path.suffix)
 
 
-def extract(video, out):
-    ffmpeg("-i", video, "-vn", "-ac", 2, "-ar", MIX_RATE, "-c:a", "pcm_s16le", _part(out))
+def extract(video, out, track=None):
+    """track: which audio stream (0 = first), for videos with several; None = ffmpeg's default pick."""
+    pick = ["-map", f"0:a:{track}"] if track is not None else []
+    ffmpeg("-i", video, *pick, "-vn", "-ac", 2, "-ar", MIX_RATE, "-c:a", "pcm_s16le", _part(out))
     _part(out).replace(out)
 
 

@@ -1,0 +1,5 @@
+{
+ "title": "Smile or They'll Know I'm Human: Undercover Among the Mimics",
+ "genre": "Chinese anime (donghua), supernatural horror survival with dark comedy",
+ "notes": "Source audio is the original Chinese (Mandarin) voice track, not an English dub: each line's \"en\" field is Chinese speech recognition, and \"on_screen\" is the film's own English subtitle. Translate the meaning from both into natural Mongolian (on_screen is the cleaner wording when the Chinese is misheard). Chinese names in the usual Mongolian Cyrillic form (Lin -> Линь, Xiao -> Сяо); speaker names in English/pinyin."
+}

@@ -113,6 +113,11 @@ def word_speakers(words, turns):
     return out
 
 
+def _cjk(ch):
+    """Chinese/Japanese character or full-width punctuation: Scribe gives these one per word, joined without spaces."""
+    return bool(ch) and ("\u3000" <= ch <= "\u9fff" or "\uff00" <= ch <= "\uffef")
+
+
 def build_lines(scribe_words, turns):
     """Scribe words -> dub lines, split on voice change, pauses and long sentences.
 
@@ -137,13 +142,14 @@ def build_lines(scribe_words, turns):
         changed = is_word and cur is not None and cur["voice"] is not None and (
             spk != cur["voice"] or w.get("speaker_id") != scribe_spk)
         new = (cur is None or changed or w["start"] - prev_end > MAX_GAP
-               or (cur["end"] - cur["start"] > MAX_LEN and cur["en"].rstrip()[-1:] in ".?!"))
+               or (cur["end"] - cur["start"] > MAX_LEN and cur["en"].rstrip()[-1:] in ".?!。？！"))
         if is_word:
             scribe_spk = w.get("speaker_id")
         if new:
             cur = {"start": w["start"], "end": w["end"], "voice": None, "en": "", "speech_start": None}
             lines.append(cur)
-        cur["en"] += (" " if cur["en"] else "") + text.strip()
+        text = text.strip()
+        cur["en"] += (" " if cur["en"] and not (_cjk(cur["en"][-1]) and _cjk(text[:1])) else "") + text
         cur["end"] = max(cur["end"], w["end"])
         prev_end = w["end"]
         if is_word:
