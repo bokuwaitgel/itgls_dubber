@@ -279,7 +279,7 @@ def main():
     title = film.get("title") or args.video.stem
     if excerpt:
         title += f" [{stamp(args.start or 0)[:8]}-{stamp(args.end)[:8] if args.end is not None else 'end'}]"
-    timed(bunny.upload, f["final"], title, work / "bunny.json", subs)
+    timed(bunny.upload, f["final"], title, work / "bunny.json", subs if args.subs != "none" else None)
 
 
 if __name__ == "__main__":
